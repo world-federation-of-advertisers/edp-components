@@ -124,22 +124,28 @@ class MetaImpressionQueryFunction(
     private const val PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
 
     /**
-     * Builds the production client with the Meta System User token.
+     * Builds the production client with the Meta System User token and app secret.
      *
-     * TODO(@jojijacob): Load the token and app secret from Secret Manager (resource names via env
-     *   vars) instead of the process environment. The `META_ACCESS_TOKEN` / `META_APP_SECRET` env
-     *   fallbacks are for local/testing only; credentials must never leave this function's
-     *   environment.
+     * Both env vars are populated from Secret Manager at deploy time — no Kotlin changes needed —
+     * via the Cloud Functions Gen 2 `--set-secrets` flag:
+     * ```
+     * gcloud functions deploy ... \
+     *   --set-secrets=META_ACCESS_TOKEN=meta-access-token:latest,META_APP_SECRET=meta-app-secret:latest
+     * ```
+     *
+     * https://cloud.google.com/functions/docs/configuring/secrets
      */
     private fun defaultInsightsClient(): MetaInsightsClient {
       val token =
         System.getenv("META_ACCESS_TOKEN")
           ?: error(
-            "META_ACCESS_TOKEN not set (TODO: load the System User token from Secret Manager)"
+            "META_ACCESS_TOKEN not set (populated from Secret Manager at deploy via --set-secrets)"
           )
       val appSecret =
         System.getenv("META_APP_SECRET")
-          ?: error("META_APP_SECRET not set (TODO: load the app secret from Secret Manager)")
+          ?: error(
+            "META_APP_SECRET not set (populated from Secret Manager at deploy via --set-secrets)"
+          )
       return MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
     }
   }
