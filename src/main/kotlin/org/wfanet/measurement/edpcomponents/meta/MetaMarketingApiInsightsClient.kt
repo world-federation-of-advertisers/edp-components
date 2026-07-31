@@ -16,24 +16,40 @@
 
 package org.wfanet.measurement.edpcomponents.meta
 
+import com.google.gson.Gson
+import com.google.gson.JsonSyntaxException
+import com.google.gson.annotations.SerializedName
+import com.google.protobuf.Timestamp
 import com.google.type.Interval
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
-import java.util.logging.Logger
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
  * [MetaInsightsClient] backed by the Meta Marketing API (Graph API) Insights endpoint.
  *
- * For each campaign it issues a synchronous Insights query broken down by `age` and `gender`, then
- * sums the impressions of the buckets that match [MetaDemographicFilter]. Synchronous is sufficient
- * for the validation query sizes (a handful of campaigns over a report interval); large-query async
- * report runs are deferred (see the class TODO and design doc §"future work").
+ * For each target it issues a synchronous Insights query at the target's `level`, broken down by
+ * `age` and `gender`, then sums the impressions of the buckets that match [MetaDemographicFilter].
+ * Synchronous is sufficient for validation query sizes (a handful of entities over a report
+ * interval); the async report-run path is deferred (see the class TODO and design doc §"future
+ * work").
+ *
+ * **Time zone.** Meta Insights buckets impressions by day in the *ad account's* immutable timezone,
+ * and `time_range.until` is inclusive of its calendar date. The request interval is a half-open
+ * `[start, end)` in absolute time, so this client resolves each node's ad-account timezone (an extra
+ * Graph call, cached per account) and converts the interval to a `time_range` in that zone: `since`
+ * is the start's date and `until` is `(end - 1 day)`'s date (mapping the exclusive end to Meta's
+ * inclusive `until`). An interval that is not midnight-aligned in the account timezone cannot be a
+ * whole number of Meta days and raises [MetaIntervalNotSupportedException].
  *
  * Auth: [accessToken] is a Meta System User token and [appSecret] is the Meta app secret, both
  * loaded from Secret Manager by the caller — they never leave this environment. Every request
@@ -41,13 +57,18 @@ import javax.crypto.spec.SecretKeySpec
  * server-to-server hardening, so a leaked token alone cannot be replayed.
  * https://developers.facebook.com/docs/graph-api/guides/secure-requests
  *
+ * TODO(@jojijacob): Confirm the following against a Meta Marketing API sandbox (tracked by the
+ *   real-Meta integration-test follow-up in README): the `account_id` / `timezone_name` field paths,
+ *   the exact `age`/`gender` bucket strings, and that `paging.next` carries `appsecret_proof`.
+ *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
- *   campaigns/intervals whose synchronous query exceeds Meta's row/time limits.
+ *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
  */
 class MetaMarketingApiInsightsClient(
   private val accessToken: String,
   private val appSecret: String,
   private val apiVersion: String = DEFAULT_API_VERSION,
+  private val graphApiBase: String = GRAPH_API_BASE,
   private val httpClient: HttpClient = HttpClient.newHttpClient(),
 ) : MetaInsightsClient {
 
@@ -55,76 +76,165 @@ class MetaMarketingApiInsightsClient(
   // instance (token and secret are fixed), so it is computed once and appended to every request.
   private val appSecretProof: String = hmacSha256Hex(key = appSecret, data = accessToken)
 
+  private val authQuery: String =
+    "access_token=${accessToken.urlEncoded()}&appsecret_proof=$appSecretProof"
+
+  private val gson = Gson()
+
+  // Ad-account timezone by account ID. Meta account timezones are immutable, so this is cached for
+  // the life of the client (which is reused across requests / concurrent invocations).
+  private val zoneByAccountId = ConcurrentHashMap<String, ZoneId>()
+
   override fun queryImpressions(
-    campaignIds: List<String>,
+    targets: List<MetaInsightsTarget>,
     timeInterval: Interval,
     demographics: MetaDemographicFilter,
   ): Long {
-    require(campaignIds.isNotEmpty()) { "campaignIds must not be empty" }
-    val since = timeInterval.startTime.toUtcDate()
-    val until = timeInterval.endTime.toUtcDate()
-    return campaignIds.sumOf { campaignId -> queryCampaign(campaignId, since, until, demographics) }
+    require(targets.isNotEmpty()) { "targets must not be empty" }
+    return targets.sumOf { target -> queryTarget(target, timeInterval, demographics) }
   }
 
-  private fun queryCampaign(
-    campaignId: String,
-    since: String,
-    until: String,
+  private fun queryTarget(
+    target: MetaInsightsTarget,
+    timeInterval: Interval,
     demographics: MetaDemographicFilter,
   ): Long {
-    // Insights broken down by age + gender so we can sum only the requested buckets. `time_range`
-    // is
-    // date-granular in Meta's API.
-    val timeRange = """{"since":"$since","until":"$until"}"""
-    val uri =
+    val zone: ZoneId = accountZone(target)
+    val timeRange: String = toMetaTimeRange(timeInterval, zone)
+
+    val allowedAges: Set<String> = demographics.ages.map { it.apiValue }.toSet()
+    val allowedGenders: Set<String> = demographics.genders.map { it.apiValue }.toSet()
+
+    val initialUri =
       URI.create(
-        "$GRAPH_API_BASE/$apiVersion/$campaignId/insights" +
-          "?level=campaign" +
+        "$graphApiBase/$apiVersion/${target.nodeId}/insights" +
+          "?level=${target.level}" +
           "&fields=impressions" +
           "&breakdowns=age,gender" +
           "&time_range=${timeRange.urlEncoded()}" +
-          "&access_token=${accessToken.urlEncoded()}" +
-          "&appsecret_proof=$appSecretProof"
+          "&$authQuery"
       )
-    val httpResponse: HttpResponse<String> =
+
+    var total = 0L
+    var nextUri: URI? = initialUri
+    while (nextUri != null) {
+      val page: InsightsPage = parseInsightsPage(get(nextUri, target.nodeId), target.nodeId)
+      for (row in page.data.orEmpty()) {
+        if (allowedAges.isNotEmpty() && row.age !in allowedAges) continue
+        if (allowedGenders.isNotEmpty() && row.gender !in allowedGenders) continue
+        total += row.impressions?.toLongOrNull() ?: 0L
+      }
+      nextUri = page.paging?.next?.let(URI::create)
+    }
+    return total
+  }
+
+  /** Resolves the ad-account timezone for [target]'s node, caching by account ID. */
+  private fun accountZone(target: MetaInsightsTarget): ZoneId {
+    val accountId: String =
+      if (target.level == ACCOUNT_LEVEL) target.nodeId.removePrefix(ACCOUNT_PREFIX)
+      else fetchAccountId(target.nodeId)
+    return zoneByAccountId.getOrPut(accountId) { fetchAccountTimeZone(accountId) }
+  }
+
+  private fun fetchAccountId(nodeId: String): String {
+    val uri = URI.create("$graphApiBase/$apiVersion/$nodeId?fields=account_id&$authQuery")
+    val node = parseNode(get(uri, nodeId), nodeId)
+    return node.accountId ?: throw MetaApiException("Meta node $nodeId returned no account_id")
+  }
+
+  private fun fetchAccountTimeZone(accountId: String): ZoneId {
+    val node = "$ACCOUNT_PREFIX$accountId"
+    val uri = URI.create("$graphApiBase/$apiVersion/$node?fields=timezone_name&$authQuery")
+    val name =
+      parseNode(get(uri, node), node).timezoneName
+        ?: throw MetaApiException("Meta account $node returned no timezone_name")
+    return try {
+      ZoneId.of(name)
+    } catch (e: RuntimeException) {
+      throw MetaApiException("Meta account $node returned unrecognized timezone_name '$name'", e)
+    }
+  }
+
+  /**
+   * Converts [interval] (half-open `[start, end)` in absolute time) to a Meta `time_range` JSON
+   * string in [zone]. `since` is the start date; `until` is `(end - 1 day)`'s date so the exclusive
+   * end maps to Meta's inclusive `until`. Throws [MetaIntervalNotSupportedException] if either bound
+   * is not midnight-aligned in [zone] (Meta supports only whole days) or the interval is empty.
+   */
+  private fun toMetaTimeRange(interval: Interval, zone: ZoneId): String {
+    val start = instantOf(interval.startTime).atZone(zone)
+    val end = instantOf(interval.endTime).atZone(zone)
+    if (start.toLocalTime() != LocalTime.MIDNIGHT || end.toLocalTime() != LocalTime.MIDNIGHT) {
+      throw MetaIntervalNotSupportedException(
+        "Interval is not day-aligned in ad account timezone $zone; Meta Insights supports only " +
+          "whole days"
+      )
+    }
+    val since: LocalDate = start.toLocalDate()
+    val until: LocalDate = end.toLocalDate().minusDays(1)
+    if (until.isBefore(since)) {
+      throw MetaIntervalNotSupportedException("Interval is empty (since=$since, until=$until)")
+    }
+    // LocalDate.toString() is ISO-8601 (yyyy-MM-dd), which is Meta's expected date format.
+    return """{"since":"$since","until":"$until"}"""
+  }
+
+  /** Sends a GET to [uri] and returns the body, mapping non-success statuses to exceptions. */
+  private fun get(uri: URI, nodeForError: String): String {
+    val response: HttpResponse<String> =
       try {
         httpClient.send(
           HttpRequest.newBuilder(uri).GET().build(),
           HttpResponse.BodyHandlers.ofString(),
         )
       } catch (e: Exception) {
-        throw MetaApiException("Marketing API request failed for campaign $campaignId", e)
+        throw MetaApiException("Marketing API request failed for $nodeForError", e)
       }
-
-    when (httpResponse.statusCode()) {
-      in 200..299 -> {}
-      404 -> throw MetaEntityNotFoundException("Campaign $campaignId not found")
+    return when (val status = response.statusCode()) {
+      in 200..299 -> response.body()
+      404 -> throw MetaEntityNotFoundException("Meta node $nodeForError not found")
       else ->
         throw MetaApiException(
-          "Marketing API returned ${httpResponse.statusCode()} for campaign $campaignId: " +
-            httpResponse.body().take(500)
+          "Marketing API returned $status for $nodeForError: ${response.body().take(500)}"
         )
     }
-
-    // TODO(@jojijacob): Parse the Insights JSON and sum impressions over the rows whose `age`/
-    //   `gender` fall in [demographics] (empty dimension = include all). Response shape:
-    //   { "data": [ { "impressions": "123", "age": "25-34", "gender": "male" }, ... ] }.
-    //   Also handle Meta's paging (`paging.next`) and rows with `impressions` absent (treat as 0).
-    //   A JSON dependency needs to be introduced per WFA convention (separate dep-approval); pick
-    //   one consistent with edp-components once its build conventions are confirmed.
-    logger.fine {
-      "Insights query for campaign $campaignId [$since..$until]: ${httpResponse.body().take(200)}"
-    }
-    throw NotImplementedError("Insights JSON parsing pending — see TODO above")
   }
 
-  private fun com.google.protobuf.Timestamp.toUtcDate(): String =
-    java.time.Instant.ofEpochSecond(seconds, nanos.toLong())
-      .atZone(ZoneOffset.UTC)
-      .toLocalDate()
-      .format(DateTimeFormatter.ISO_LOCAL_DATE)
+  private fun parseInsightsPage(body: String, nodeForError: String): InsightsPage {
+    val page =
+      try {
+        gson.fromJson(body, InsightsPage::class.java)
+      } catch (e: JsonSyntaxException) {
+        throw MetaApiException("Malformed Insights JSON for $nodeForError: ${body.take(200)}", e)
+      } ?: throw MetaApiException("Empty Insights response for $nodeForError")
+    page.error.throwIfPresent(nodeForError)
+    return page
+  }
 
-  private fun String.urlEncoded(): String = java.net.URLEncoder.encode(this, Charsets.UTF_8)
+  private fun parseNode(body: String, nodeForError: String): NodeResponse {
+    val node =
+      try {
+        gson.fromJson(body, NodeResponse::class.java)
+      } catch (e: JsonSyntaxException) {
+        throw MetaApiException("Malformed node JSON for $nodeForError: ${body.take(200)}", e)
+      } ?: throw MetaApiException("Empty node response for $nodeForError")
+    node.error.throwIfPresent(nodeForError)
+    return node
+  }
+
+  // Meta sometimes embeds an error object in an HTTP 200 body; treating that as zero impressions
+  // would be a silent wrong answer, so any present error is raised.
+  private fun MetaError?.throwIfPresent(nodeForError: String) {
+    if (this != null) {
+      throw MetaApiException("Meta returned error for $nodeForError: $message (code $code)")
+    }
+  }
+
+  private fun instantOf(ts: Timestamp): Instant =
+    Instant.ofEpochSecond(ts.seconds, ts.nanos.toLong())
+
+  private fun String.urlEncoded(): String = URLEncoder.encode(this, Charsets.UTF_8)
 
   private fun hmacSha256Hex(key: String, data: String): String {
     val mac = Mac.getInstance("HmacSHA256")
@@ -134,9 +244,38 @@ class MetaMarketingApiInsightsClient(
     }
   }
 
+  // Meta Insights response shapes (only the fields consumed here). All nullable: gson leaves absent
+  // fields null, and a `{"error":{...}}` body has none of the data fields.
+  private data class InsightsPage(
+    val data: List<InsightsRow>? = null,
+    val paging: Paging? = null,
+    val error: MetaError? = null,
+  )
+
+  private data class InsightsRow(
+    val impressions: String? = null,
+    val age: String? = null,
+    val gender: String? = null,
+  )
+
+  private data class Paging(val next: String? = null)
+
+  private data class NodeResponse(
+    @SerializedName("account_id") val accountId: String? = null,
+    @SerializedName("timezone_name") val timezoneName: String? = null,
+    val error: MetaError? = null,
+  )
+
+  private data class MetaError(
+    val message: String? = null,
+    val code: Long? = null,
+    val type: String? = null,
+  )
+
   companion object {
-    private val logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
     private const val GRAPH_API_BASE = "https://graph.facebook.com"
+    private const val ACCOUNT_LEVEL = "account"
+    private const val ACCOUNT_PREFIX = "act_"
     // v25.0 (released 2026-02-18) is the current Graph API version per Meta's changelog:
     // https://developers.facebook.com/docs/graph-api/changelog
     private const val DEFAULT_API_VERSION = "v25.0"

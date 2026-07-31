@@ -22,25 +22,33 @@ import com.google.type.Interval
  * Reads impression counts from Meta's Marketing API (Graph API Insights).
  *
  * This is the only part of the Meta cloud function that talks to Meta. It is intentionally narrow:
- * given already-resolved Meta campaign IDs, a time interval, and a demographic breakdown filter, it
- * returns the summed impression count. Translating the request's `event_group_reference_id` to
- * campaign IDs and the CEL filter to [MetaDemographicFilter] happens upstream in
- * [MetaImpressionQueryFunction].
+ * given already-resolved Insights [targets][MetaInsightsTarget] (Graph node ID + aggregation
+ * `level`), a time interval, and a demographic breakdown filter, it returns the summed impression
+ * count. Resolving the request's entity keys to targets (via [MetaEntityModule]) and the CEL filter
+ * to [MetaDemographicFilter] happens upstream in [MetaImpressionQueryFunction].
  */
 interface MetaInsightsClient {
   /**
-   * Returns the total Meta impression count for [campaignIds] over [timeInterval], restricted to
-   * the demographic buckets in [demographics].
+   * Returns the total Meta impression count across [targets] over [timeInterval], restricted to the
+   * demographic buckets in [demographics].
    *
-   * @throws MetaEntityNotFoundException if a campaign ID is not found / not accessible.
+   * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.
+   * @throws MetaIntervalNotSupportedException if [timeInterval] cannot be expressed as a Meta
+   *   day-granular `time_range` (not midnight-aligned in the ad account's timezone).
    */
   fun queryImpressions(
-    campaignIds: List<String>,
+    targets: List<MetaInsightsTarget>,
     timeInterval: Interval,
     demographics: MetaDemographicFilter,
   ): Long
 }
+
+/**
+ * A resolved Meta Insights query target: the Graph [nodeId] to query and the aggregation [level]
+ * (`account` / `campaign` / `adset` / `ad`) that node is at.
+ */
+data class MetaInsightsTarget(val nodeId: String, val level: String)
 
 /**
  * A demographic slice expressed in Meta's fixed breakdown dimensions. An empty set means "no
@@ -84,3 +92,10 @@ class MetaEntityNotFoundException(message: String, cause: Throwable? = null) :
 
 /** The Marketing API call failed (network, auth, rate limit, 5xx, etc.). */
 class MetaApiException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * The requested time interval cannot be expressed as a Meta day-granular `time_range` — i.e. it is
+ * not aligned to midnight boundaries in the ad account's timezone. Meta Insights only supports
+ * whole days in the account's timezone, so sub-day or unaligned intervals cannot be answered.
+ */
+class MetaIntervalNotSupportedException(message: String) : Exception(message)

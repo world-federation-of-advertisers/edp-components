@@ -26,7 +26,6 @@ import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponseKt.impressionCount
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponseKt.skipDetail
-import org.wfanet.measurement.api.v2alpha.ImpressionQuery
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
 
 /**
@@ -34,11 +33,11 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * 2).
  *
  * A **dumb publisher-API adapter** (design doc §7): it parses a
- * [DataProviderImpressionQueryRequest] (binary proto), resolves the entity keys to Meta campaign
- * IDs, translates the CEL filter to a Meta demographic breakdown, queries the Marketing API
- * Insights endpoint for the raw impression count over the interval, and returns a
- * [DataProviderImpressionQueryResponse]. It performs no comparison, no verdict, and no callback —
- * that all lives in the Reporting Server's `EdpValidationPostProcessor`.
+ * [DataProviderImpressionQueryRequest] (binary proto), routes each entity key to a Meta Insights
+ * target by its `entity_type` (via [MetaEntityModules]), translates the CEL filter to a Meta
+ * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
+ * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no comparison,
+ * no verdict, and no callback — that all lives in the Reporting Server's `EdpValidationPostProcessor`.
  *
  * The Reporting Server authenticates to this function with a GCP OIDC ID token (handled by the
  * platform / the `ValidationCloudFunctionClient`); Meta credentials live only in this function's
@@ -66,14 +65,29 @@ class MetaImpressionQueryFunction(
             request.query.filter.expression,
         )
 
-    val campaignIds = resolveCampaignIds(request.query.entityKeysList)
+    // Route each entity to its Meta Insights target by entity_type. An unsupported type skips the
+    // whole request: a partial sum over only the supported entities would be a wrong number, not a
+    // valid smaller one.
+    val targets = ArrayList<MetaInsightsTarget>(request.query.entityKeysList.size)
+    for (entityKey in request.query.entityKeysList) {
+      val module =
+        MetaEntityModules[entityKey.entityType]
+          ?: return skip(
+            request.requestId,
+            SkipReason.FILTER_NOT_SUPPORTED,
+            "unsupported entity_type: ${entityKey.entityType}",
+          )
+      targets += MetaInsightsTarget(module.nodeId(entityKey.entityId), module.level)
+    }
+
     return try {
-      val count =
-        insightsClient.queryImpressions(campaignIds, request.query.timeInterval, demographics)
+      val count = insightsClient.queryImpressions(targets, request.query.timeInterval, demographics)
       dataProviderImpressionQueryResponse {
         requestId = request.requestId
         result = impressionCount { value = count }
       }
+    } catch (e: MetaIntervalNotSupportedException) {
+      skip(request.requestId, SkipReason.FILTER_NOT_SUPPORTED, e.message ?: "interval not supported")
     } catch (e: MetaEntityNotFoundException) {
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaApiException) {
@@ -81,19 +95,6 @@ class MetaImpressionQueryFunction(
       skip(request.requestId, SkipReason.API_ERROR, e.message ?: "Marketing API error")
     }
   }
-
-  /**
-   * Resolves the request entity keys to Meta campaign IDs.
-   *
-   * For Meta, the `event_group_reference_id` set at onboarding *is* the Meta campaign ID, so the
-   * `entity_id` maps 1:1 to a campaign.
-   *
-   * TODO(@jojijacob): Confirm a single `event_group_reference_id` never fans out to multiple Meta
-   *   campaigns (a campaign group). If it can, decode the composite here and return all of them;
-   *   the caller already sums impressions across the returned campaign IDs.
-   */
-  private fun resolveCampaignIds(entityKeys: List<ImpressionQuery.EntityKey>): List<String> =
-    entityKeys.map { it.entityId }
 
   /**
    * Translates the CEL [expression] to a Meta demographic breakdown, or returns null if it cannot

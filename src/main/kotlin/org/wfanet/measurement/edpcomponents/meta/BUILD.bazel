@@ -14,12 +14,14 @@ kt_jvm_proto_library(
 kt_jvm_library(
     name = "meta_impression_query",
     srcs = [
+        "MetaEntityModule.kt",
         "MetaImpressionQueryFunction.kt",
         "MetaInsightsClient.kt",
         "MetaMarketingApiInsightsClient.kt",
     ],
     deps = [
         ":data_provider_impression_query_kt_jvm_proto",
+        "@maven//:com_google_code_gson_gson",
         "@wfa_common_jvm//imports/java/com/google/cloud/functions:functions_framework_api",
         "@wfa_common_jvm//imports/java/com/google/protobuf",
     ],
