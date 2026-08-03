@@ -36,8 +36,9 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * [DataProviderImpressionQueryRequest] (binary proto), routes each entity key to a Meta Insights
  * target by its `entity_type` (via [MetaEntityModules]), translates the CEL filter to a Meta
  * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
- * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no comparison,
- * no verdict, and no callback — that all lives in the Reporting Server's `EdpValidationPostProcessor`.
+ * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
+ * comparison, no verdict, and no callback — that all lives in the Reporting Server's
+ * `EdpValidationPostProcessor`.
  *
  * The Reporting Server authenticates to this function with a GCP OIDC ID token (handled by the
  * platform / the `ValidationCloudFunctionClient`); Meta credentials live only in this function's
@@ -87,7 +88,11 @@ class MetaImpressionQueryFunction(
         result = impressionCount { value = count }
       }
     } catch (e: MetaIntervalNotSupportedException) {
-      skip(request.requestId, SkipReason.FILTER_NOT_SUPPORTED, e.message ?: "interval not supported")
+      skip(
+        request.requestId,
+        SkipReason.FILTER_NOT_SUPPORTED,
+        e.message ?: "interval not supported",
+      )
     } catch (e: MetaEntityNotFoundException) {
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaApiException) {

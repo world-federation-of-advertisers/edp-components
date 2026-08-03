@@ -45,21 +45,17 @@ import javax.crypto.spec.SecretKeySpec
  *
  * **Time zone.** Meta Insights buckets impressions by day in the *ad account's* immutable timezone,
  * and `time_range.until` is inclusive of its calendar date. The request interval is a half-open
- * `[start, end)` in absolute time, so this client resolves each node's ad-account timezone (an extra
- * Graph call, cached per account) and converts the interval to a `time_range` in that zone: `since`
- * is the start's date and `until` is `(end - 1 day)`'s date (mapping the exclusive end to Meta's
- * inclusive `until`). An interval that is not midnight-aligned in the account timezone cannot be a
- * whole number of Meta days and raises [MetaIntervalNotSupportedException].
+ * `[start, end)` in absolute time, so this client resolves each node's ad-account timezone (an
+ * extra Graph call, cached per account) and converts the interval to a `time_range` in that zone:
+ * `since` is the start's date and `until` is `(end - 1 day)`'s date (mapping the exclusive end to
+ * Meta's inclusive `until`). An interval that is not midnight-aligned in the account timezone
+ * cannot be a whole number of Meta days and raises [MetaIntervalNotSupportedException].
  *
  * Auth: [accessToken] is a Meta System User token and [appSecret] is the Meta app secret, both
  * loaded from Secret Manager by the caller — they never leave this environment. Every request
- * carries an `appsecret_proof` (HMAC-SHA256 of the access token, keyed by the app secret) per Meta's
- * server-to-server hardening, so a leaked token alone cannot be replayed.
+ * carries an `appsecret_proof` (HMAC-SHA256 of the access token, keyed by the app secret) per
+ * Meta's server-to-server hardening, so a leaked token alone cannot be replayed.
  * https://developers.facebook.com/docs/graph-api/guides/secure-requests
- *
- * TODO(@jojijacob): Confirm the following against a Meta Marketing API sandbox (tracked by the
- *   real-Meta integration-test follow-up in README): the `account_id` / `timezone_name` field paths,
- *   the exact `age`/`gender` bucket strings, and that `paging.next` carries `appsecret_proof`.
  *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
  *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
@@ -124,9 +120,16 @@ class MetaMarketingApiInsightsClient(
         if (allowedGenders.isNotEmpty() && row.gender !in allowedGenders) continue
         total += row.impressions?.toLongOrNull() ?: 0L
       }
-      nextUri = page.paging?.next?.let(URI::create)
+      // Meta's paging.next echoes access_token but deliberately NOT appsecret_proof (Meta won't act
+      // as a signing oracle for it), so it must be re-appended or the paged request fails auth.
+      nextUri = page.paging?.next?.let { URI.create(withAppSecretProof(it)) }
     }
     return total
+  }
+
+  private fun withAppSecretProof(url: String): String {
+    val separator = if ('?' in url) "&" else "?"
+    return "$url${separator}appsecret_proof=$appSecretProof"
   }
 
   /** Resolves the ad-account timezone for [target]'s node, caching by account ID. */
@@ -159,8 +162,9 @@ class MetaMarketingApiInsightsClient(
   /**
    * Converts [interval] (half-open `[start, end)` in absolute time) to a Meta `time_range` JSON
    * string in [zone]. `since` is the start date; `until` is `(end - 1 day)`'s date so the exclusive
-   * end maps to Meta's inclusive `until`. Throws [MetaIntervalNotSupportedException] if either bound
-   * is not midnight-aligned in [zone] (Meta supports only whole days) or the interval is empty.
+   * end maps to Meta's inclusive `until`. Throws [MetaIntervalNotSupportedException] if either
+   * bound is not midnight-aligned in [zone] (Meta supports only whole days) or the interval is
+   * empty.
    */
   private fun toMetaTimeRange(interval: Interval, zone: ZoneId): String {
     val start = instantOf(interval.startTime).atZone(zone)

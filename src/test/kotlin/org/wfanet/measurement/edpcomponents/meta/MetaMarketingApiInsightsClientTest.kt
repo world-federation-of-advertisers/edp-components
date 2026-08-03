@@ -83,8 +83,7 @@ class MetaMarketingApiInsightsClientTest {
       httpClient = HttpClient.newHttpClient(),
     )
 
-  private fun insightsRequest(): URI =
-    requestUris.single { it.path.endsWith("/insights") }
+  private fun insightsRequest(): URI = requestUris.single { it.path.endsWith("/insights") }
 
   private fun insightsQueryDecoded(): String =
     URLDecoder.decode(insightsRequest().rawQuery, StandardCharsets.UTF_8)
@@ -100,7 +99,8 @@ class MetaMarketingApiInsightsClientTest {
           ]}"""
       )
 
-    // Interval bounds are Asia/Tokyo (UTC+9) midnights: 2026-06-30T15:00Z == 2026-07-01T00:00 Tokyo,
+    // Interval bounds are Asia/Tokyo (UTC+9) midnights: 2026-06-30T15:00Z == 2026-07-01T00:00
+    // Tokyo,
     // and 2026-07-02T15:00Z == 2026-07-03T00:00 Tokyo. So since=2026-07-01 (proves account TZ is
     // applied, not UTC where it would be 06-30) and until=2026-07-02 (end date 07-03 minus one day,
     // proving the exclusive end maps to Meta's inclusive until).
@@ -127,9 +127,11 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `follows paging_next and sums across pages`() {
+  fun `follows paging_next, re-appends appsecret_proof, and sums across pages`() {
+    // Meta's paging.next echoes access_token but omits appsecret_proof; the client must re-append
+    // it.
     val nextUri =
-      "http://127.0.0.1:${server.address.port}/$API_VERSION/111/insights?after=CURSOR"
+      "http://127.0.0.1:${server.address.port}/$API_VERSION/111/insights?after=CURSOR&access_token=$ACCESS_TOKEN"
     insightsResponses =
       listOf(
         200 to """{"data":[{"impressions":"100"}],"paging":{"next":"$nextUri"}}""",
@@ -140,6 +142,11 @@ class MetaMarketingApiInsightsClientTest {
 
     assertThat(count).isEqualTo(123L)
     assertThat(requestUris.count { it.path.endsWith("/insights") }).isEqualTo(2)
+    val pagedRequest =
+      requestUris.single {
+        it.path.endsWith("/insights") && (it.rawQuery ?: "").contains("after=CURSOR")
+      }
+    assertThat(pagedRequest.rawQuery).contains("appsecret_proof=")
   }
 
   @Test
@@ -152,9 +159,12 @@ class MetaMarketingApiInsightsClientTest {
             {"impressions":"50","age":"25-34","gender":"male"},
             {"impressions":"30","age":"18-24","gender":"female"}
           ]}"""
-    )
+      )
     val filter =
-      MetaDemographicFilter(ages = setOf(MetaAgeBracket.AGE_25_34), genders = setOf(MetaGender.FEMALE))
+      MetaDemographicFilter(
+        ages = setOf(MetaAgeBracket.AGE_25_34),
+        genders = setOf(MetaGender.FEMALE),
+      )
 
     val count = client().queryImpressions(listOf(campaignTarget()), alignedInterval(), filter)
 
@@ -190,8 +200,7 @@ class MetaMarketingApiInsightsClientTest {
 
   @Test
   fun `throws MetaApiException on an error embedded in a 200 body`() {
-    insightsResponses =
-      listOf(200 to """{"error":{"message":"Invalid OAuth token","code":190}}""")
+    insightsResponses = listOf(200 to """{"error":{"message":"Invalid OAuth token","code":190}}""")
 
     assertFailsWith<MetaApiException> {
       client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
@@ -203,11 +212,10 @@ class MetaMarketingApiInsightsClientTest {
     insightsResponses = listOf(200 to """{"data":[]}""") // should never be reached
 
     // 2026-06-30T15:30Z is 00:30 in Tokyo — not a midnight boundary.
-    val unaligned =
-      interval {
-        startTime = timestamp { seconds = Instant.parse("2026-06-30T15:30:00Z").epochSecond }
-        endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
-      }
+    val unaligned = interval {
+      startTime = timestamp { seconds = Instant.parse("2026-06-30T15:30:00Z").epochSecond }
+      endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
+    }
 
     assertFailsWith<MetaIntervalNotSupportedException> {
       client().queryImpressions(listOf(campaignTarget()), unaligned, UNFILTERED)
@@ -217,11 +225,10 @@ class MetaMarketingApiInsightsClientTest {
 
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
 
-  private fun alignedInterval() =
-    interval {
-      startTime = timestamp { seconds = Instant.parse("2026-06-30T15:00:00Z").epochSecond }
-      endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
-    }
+  private fun alignedInterval() = interval {
+    startTime = timestamp { seconds = Instant.parse("2026-06-30T15:00:00Z").epochSecond }
+    endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
+  }
 
   companion object {
     private const val ACCESS_TOKEN = "test-token"

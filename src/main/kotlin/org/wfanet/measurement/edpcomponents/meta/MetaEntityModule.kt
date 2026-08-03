@@ -21,7 +21,8 @@ package org.wfanet.measurement.edpcomponents.meta
  *
  * Meta's Insights endpoint answers at four node levels — account, campaign, ad set, ad — each a
  * different `level` on `/{node-id}/insights`. The request's `ImpressionQuery.EntityKey.entity_type`
- * says which level an `entity_id` refers to; a module turns that into the Graph node ID and `level`.
+ * says which level an `entity_id` refers to; a module turns that into the Graph node ID and
+ * `level`.
  *
  * Support for a new entity type is added by implementing this interface and registering the module
  * in [MetaEntityModules] — nothing else changes. An `entity_type` with no module is unsupported and
@@ -59,6 +60,7 @@ object CampaignModule : MetaEntityModule {
  *   entityType = "account"; level = "account"; fun nodeId(id) = "act_$id"
  * }
  * ```
+ *
  * Nothing else needs to change: the function routes on `entity_type` and the client uses [level] /
  * [nodeId] to build the request.
  */

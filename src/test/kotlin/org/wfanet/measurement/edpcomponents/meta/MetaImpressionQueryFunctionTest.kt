@@ -131,24 +131,23 @@ class MetaImpressionQueryFunctionTest {
     filter: String = "",
     entityType: String = "campaign",
     entityIds: List<String>,
-  ) =
-    dataProviderImpressionQueryRequest {
-      requestId = REQUEST_ID
-      dataProvider = "dataProviders/edp-meta"
-      query = impressionQuery {
-        for (id in entityIds) {
-          entityKeys += entityKey {
-            this.entityType = entityType
-            entityId = id
-          }
+  ) = dataProviderImpressionQueryRequest {
+    requestId = REQUEST_ID
+    dataProvider = "dataProviders/edp-meta"
+    query = impressionQuery {
+      for (id in entityIds) {
+        entityKeys += entityKey {
+          this.entityType = entityType
+          entityId = id
         }
-        timeInterval = interval {
-          startTime = timestamp { seconds = 1_700_000_000 }
-          endTime = timestamp { seconds = 1_700_086_400 }
-        }
-        this.filter = eventFilter { expression = filter }
       }
+      timeInterval = interval {
+        startTime = timestamp { seconds = 1_700_000_000 }
+        endTime = timestamp { seconds = 1_700_086_400 }
+      }
+      this.filter = eventFilter { expression = filter }
     }
+  }
 
   companion object {
     private const val REQUEST_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
