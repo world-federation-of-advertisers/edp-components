@@ -49,10 +49,19 @@ class MetaImpressionQueryFunction(
 ) : HttpFunction {
 
   override fun service(request: HttpRequest, response: HttpResponse) {
-    val queryRequest = request.inputStream.use { DataProviderImpressionQueryRequest.parseFrom(it) }
-    val queryResponse = handle(queryRequest)
-    response.setContentType(PROTOBUF_CONTENT_TYPE)
-    response.outputStream.use { queryResponse.writeTo(it) }
+    // Catch everything here so a failure (proto parse, an unroutable entity, etc.) is logged on the
+    // Meta side and surfaced as an HTTP 500, rather than propagating with no local trace. Mirrors
+    // the cloud functions in cross-media-measurement.
+    try {
+      val queryRequest =
+        request.inputStream.use { DataProviderImpressionQueryRequest.parseFrom(it) }
+      val queryResponse = handle(queryRequest)
+      response.setContentType(PROTOBUF_CONTENT_TYPE)
+      response.outputStream.use { queryResponse.writeTo(it) }
+    } catch (e: Exception) {
+      logger.log(Level.SEVERE, "Impression query failed", e)
+      response.setStatusCode(500)
+    }
   }
 
   /** Request → response, free of servlet types so it can be unit-tested directly. */

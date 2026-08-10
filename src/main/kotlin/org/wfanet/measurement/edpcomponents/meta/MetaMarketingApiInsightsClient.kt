@@ -26,6 +26,7 @@ import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
@@ -65,7 +66,8 @@ class MetaMarketingApiInsightsClient(
   private val appSecret: String,
   private val apiVersion: String = DEFAULT_API_VERSION,
   private val graphApiBase: String = GRAPH_API_BASE,
-  private val httpClient: HttpClient = HttpClient.newHttpClient(),
+  private val httpClient: HttpClient =
+    HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
 ) : MetaInsightsClient {
 
   // HMAC-SHA256 of the access token keyed by the app secret, in lowercase hex. Constant per client
@@ -80,6 +82,10 @@ class MetaMarketingApiInsightsClient(
   // Ad-account timezone by account ID. Meta account timezones are immutable, so this is cached for
   // the life of the client (which is reused across requests / concurrent invocations).
   private val zoneByAccountId = ConcurrentHashMap<String, ZoneId>()
+
+  // Ad-account ID by node ID, so a repeated node isn't re-resolved on every request. A node's
+  // parent account is stable, so caching for the client's life is safe.
+  private val accountIdByNodeId = ConcurrentHashMap<String, String>()
 
   override fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -101,9 +107,11 @@ class MetaMarketingApiInsightsClient(
     val allowedAges: Set<String> = demographics.ages.map { it.apiValue }.toSet()
     val allowedGenders: Set<String> = demographics.genders.map { it.apiValue }.toSet()
 
+    // The node ID is the caller's entity_id verbatim; encode it so an odd character can't break the
+    // URI or inject query parameters.
     val initialUri =
       URI.create(
-        "$graphApiBase/$apiVersion/${target.nodeId}/insights" +
+        "$graphApiBase/$apiVersion/${target.nodeId.urlEncoded()}/insights" +
           "?level=${target.level}" +
           "&fields=impressions" +
           "&breakdowns=age,gender" +
@@ -118,7 +126,16 @@ class MetaMarketingApiInsightsClient(
       for (row in page.data.orEmpty()) {
         if (allowedAges.isNotEmpty() && row.age !in allowedAges) continue
         if (allowedGenders.isNotEmpty() && row.gender !in allowedGenders) continue
-        total += row.impressions?.toLongOrNull() ?: 0L
+        // Fail loudly on a missing/non-numeric count: unlike a total-zero (which is skipped), a
+        // partial undercount gets compared and can inflate the deviation toward a false FAIL.
+        val impressions =
+          row.impressions
+            ?: throw MetaApiException("Missing impressions in Insights row for ${target.nodeId}")
+        total +=
+          impressions.toLongOrNull()
+            ?: throw MetaApiException(
+              "Non-numeric impressions '$impressions' in Insights row for ${target.nodeId}"
+            )
       }
       // Meta's paging.next echoes access_token but deliberately NOT appsecret_proof (Meta won't act
       // as a signing oracle for it), so it must be re-appended or the paged request fails auth.
@@ -132,23 +149,28 @@ class MetaMarketingApiInsightsClient(
     return "$url${separator}appsecret_proof=$appSecretProof"
   }
 
-  /** Resolves the ad-account timezone for [target]'s node, caching by account ID. */
+  /**
+   * Resolves the ad-account timezone for [target]'s node. Both the node→account mapping and the
+   * account→timezone mapping are cached, so a repeated node costs zero extra Graph round trips.
+   */
   private fun accountZone(target: MetaInsightsTarget): ZoneId {
     val accountId: String =
       if (target.level == ACCOUNT_LEVEL) target.nodeId.removePrefix(ACCOUNT_PREFIX)
-      else fetchAccountId(target.nodeId)
-    return zoneByAccountId.getOrPut(accountId) { fetchAccountTimeZone(accountId) }
+      else accountIdByNodeId.computeIfAbsent(target.nodeId) { fetchAccountId(it) }
+    return zoneByAccountId.computeIfAbsent(accountId) { fetchAccountTimeZone(it) }
   }
 
   private fun fetchAccountId(nodeId: String): String {
-    val uri = URI.create("$graphApiBase/$apiVersion/$nodeId?fields=account_id&$authQuery")
+    val uri =
+      URI.create("$graphApiBase/$apiVersion/${nodeId.urlEncoded()}?fields=account_id&$authQuery")
     val node = parseNode(get(uri, nodeId), nodeId)
     return node.accountId ?: throw MetaApiException("Meta node $nodeId returned no account_id")
   }
 
   private fun fetchAccountTimeZone(accountId: String): ZoneId {
     val node = "$ACCOUNT_PREFIX$accountId"
-    val uri = URI.create("$graphApiBase/$apiVersion/$node?fields=timezone_name&$authQuery")
+    val uri =
+      URI.create("$graphApiBase/$apiVersion/${node.urlEncoded()}?fields=timezone_name&$authQuery")
     val name =
       parseNode(get(uri, node), node).timezoneName
         ?: throw MetaApiException("Meta account $node returned no timezone_name")
@@ -189,7 +211,7 @@ class MetaMarketingApiInsightsClient(
     val response: HttpResponse<String> =
       try {
         httpClient.send(
-          HttpRequest.newBuilder(uri).GET().build(),
+          HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT).GET().build(),
           HttpResponse.BodyHandlers.ofString(),
         )
       } catch (e: Exception) {
@@ -280,6 +302,10 @@ class MetaMarketingApiInsightsClient(
     private const val GRAPH_API_BASE = "https://graph.facebook.com"
     private const val ACCOUNT_LEVEL = "account"
     private const val ACCOUNT_PREFIX = "act_"
+    // Per-connection and per-request ceilings so a stalled Meta call can't hang the function: a
+    // single query makes several sequential Graph round trips under the caller's overall budget.
+    private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(5)
+    private val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(10)
     // v25.0 (released 2026-02-18) is the current Graph API version per Meta's changelog:
     // https://developers.facebook.com/docs/graph-api/changelog
     private const val DEFAULT_API_VERSION = "v25.0"

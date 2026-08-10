@@ -64,7 +64,9 @@ class MetaMarketingApiInsightsClientTest {
     val query = exchange.requestURI.rawQuery ?: ""
     val (status, body) =
       when {
-        path.endsWith("/insights") -> insightsResponses[insightsIndex++]
+        path.endsWith("/insights") ->
+          insightsResponses.getOrNull(insightsIndex++)
+            ?: (500 to """{"error":{"message":"no canned insights response","code":0}}""")
         query.contains("fields=account_id") -> 200 to accountIdBody
         query.contains("fields=timezone_name") -> 200 to timezoneBody
         else -> 500 to """{"error":{"message":"unexpected request","code":1}}"""
@@ -221,6 +223,77 @@ class MetaMarketingApiInsightsClientTest {
       client().queryImpressions(listOf(campaignTarget()), unaligned, UNFILTERED)
     }
     assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+  }
+
+  @Test
+  fun `sums across multiple targets and fetches the account timezone only once`() {
+    insightsResponses =
+      listOf(
+        200 to """{"data":[{"impressions":"100"}]}""",
+        200 to """{"data":[{"impressions":"25"}]}""",
+      )
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(
+            MetaInsightsTarget(nodeId = "111", level = "campaign"),
+            MetaInsightsTarget(nodeId = "222", level = "campaign"),
+          ),
+          alignedInterval(),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(125L)
+    // Both targets are under the same account, so the timezone is resolved once (cache reuse).
+    assertThat(requestUris.count { (it.rawQuery ?: "").contains("fields=timezone_name") })
+      .isEqualTo(1)
+  }
+
+  @Test
+  fun `resolves timezone directly for an account-level target without an account_id lookup`() {
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"7"}]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(MetaInsightsTarget(nodeId = "act_999", level = "account")),
+          alignedInterval(),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(7L)
+    assertThat(requestUris.none { (it.rawQuery ?: "").contains("fields=account_id") }).isTrue()
+    assertThat(insightsRequest().path).isEqualTo("/$API_VERSION/act_999/insights")
+  }
+
+  @Test
+  fun `throws MetaApiException when the node returns no account_id`() {
+    accountIdBody = """{"id":"111"}"""
+    insightsResponses = listOf(200 to """{"data":[]}""")
+
+    assertFailsWith<MetaApiException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `throws MetaApiException when timezone_name is unrecognized`() {
+    timezoneBody = """{"timezone_name":"Not/AZone"}"""
+    insightsResponses = listOf(200 to """{"data":[]}""")
+
+    assertFailsWith<MetaApiException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `throws MetaApiException on a non-numeric impressions value`() {
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"not-a-number"}]}""")
+
+    assertFailsWith<MetaApiException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
   }
 
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")

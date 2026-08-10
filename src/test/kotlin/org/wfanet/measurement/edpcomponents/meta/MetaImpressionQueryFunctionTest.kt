@@ -16,13 +16,23 @@
 
 package org.wfanet.measurement.edpcomponents.meta
 
+import com.google.cloud.functions.HttpRequest
+import com.google.cloud.functions.HttpResponse
 import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.timestamp
 import com.google.type.Interval
 import com.google.type.interval
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.Optional
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
+import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.eventFilter
@@ -49,6 +59,94 @@ class MetaImpressionQueryFunctionTest {
       throwable?.let { throw it }
       return result
     }
+  }
+
+  /** Minimal [HttpRequest] exposing a fixed binary body; unused accessors return empty defaults. */
+  private class FakeHttpRequest(private val body: ByteArray) : HttpRequest {
+    override fun getInputStream(): InputStream = ByteArrayInputStream(body)
+
+    override fun getReader(): BufferedReader = ByteArrayInputStream(body).bufferedReader()
+
+    override fun getMethod(): String = "POST"
+
+    override fun getUri(): String = "/"
+
+    override fun getPath(): String = "/"
+
+    override fun getQuery(): Optional<String> = Optional.empty()
+
+    override fun getQueryParameters(): Map<String, List<String>> = emptyMap()
+
+    override fun getParts(): Map<String, HttpRequest.HttpPart> = emptyMap()
+
+    override fun getContentType(): Optional<String> = Optional.of("application/x-protobuf")
+
+    override fun getContentLength(): Long = body.size.toLong()
+
+    override fun getCharacterEncoding(): Optional<String> = Optional.empty()
+
+    override fun getHeaders(): Map<String, List<String>> = emptyMap()
+  }
+
+  /** Minimal [HttpResponse] capturing status, content type, and written bytes. */
+  private class FakeHttpResponse : HttpResponse {
+    var statusCode: Int? = null
+      private set
+
+    var contentTypeValue: String? = null
+      private set
+
+    private val output = ByteArrayOutputStream()
+
+    val body: ByteArray
+      get() = output.toByteArray()
+
+    override fun setStatusCode(code: Int) {
+      statusCode = code
+    }
+
+    override fun setStatusCode(code: Int, message: String) {
+      statusCode = code
+    }
+
+    override fun setContentType(contentType: String) {
+      contentTypeValue = contentType
+    }
+
+    override fun getContentType(): Optional<String> = Optional.ofNullable(contentTypeValue)
+
+    override fun appendHeader(header: String, value: String) {}
+
+    override fun getHeaders(): Map<String, List<String>> = emptyMap()
+
+    override fun getOutputStream(): OutputStream = output
+
+    override fun getWriter(): BufferedWriter = output.bufferedWriter()
+  }
+
+  @Test
+  fun `service parses the request, sets the protobuf content type, and writes the response bytes`() {
+    val fake = FakeMetaInsightsClient(result = 999L)
+    val httpResponse = FakeHttpResponse()
+
+    MetaImpressionQueryFunction(fake)
+      .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
+
+    assertThat(httpResponse.contentTypeValue).isEqualTo("application/x-protobuf")
+    val parsed = DataProviderImpressionQueryResponse.parseFrom(httpResponse.body)
+    assertThat(parsed.requestId).isEqualTo(REQUEST_ID)
+    assertThat(parsed.result.value).isEqualTo(999L)
+  }
+
+  @Test
+  fun `service returns 500 on a malformed request body`() {
+    val httpResponse = FakeHttpResponse()
+
+    // First byte 0x6E ('n') decodes to an invalid protobuf wire type, so parseFrom throws.
+    MetaImpressionQueryFunction(FakeMetaInsightsClient())
+      .service(FakeHttpRequest("not a valid proto".toByteArray()), httpResponse)
+
+    assertThat(httpResponse.statusCode).isEqualTo(500)
   }
 
   @Test
