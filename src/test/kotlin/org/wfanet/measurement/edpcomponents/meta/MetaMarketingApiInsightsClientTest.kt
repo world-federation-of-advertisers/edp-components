@@ -251,6 +251,23 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
+  fun `resolves a repeated node's account only once across queries`() {
+    insightsResponses =
+      listOf(
+        200 to """{"data":[{"impressions":"10"}]}""",
+        200 to """{"data":[{"impressions":"5"}]}""",
+      )
+    // One instance, as in a warm function instance serving successive requests. Querying the same
+    // node twice must resolve its account_id only once (the accountIdByNodeId cache).
+    val client = client()
+
+    client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+
+    assertThat(requestUris.count { (it.rawQuery ?: "").contains("fields=account_id") }).isEqualTo(1)
+  }
+
+  @Test
   fun `resolves timezone directly for an account-level target without an account_id lookup`() {
     insightsResponses = listOf(200 to """{"data":[{"impressions":"7"}]}""")
 
