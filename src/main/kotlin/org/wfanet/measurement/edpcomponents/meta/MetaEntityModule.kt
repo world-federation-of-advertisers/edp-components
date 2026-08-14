@@ -25,12 +25,15 @@ package org.wfanet.measurement.edpcomponents.meta
  * `level`.
  *
  * Support for a new entity type is added by implementing this interface and registering the module
- * in [MetaEntityModules] — nothing else changes. An `entity_type` with no module is unsupported and
- * the request is skipped with `FILTER_NOT_SUPPORTED` (see [MetaImpressionQueryFunction]).
+ * in [MetaEntityModules]. An `entity_type` with no module is unsupported and the request is skipped
+ * with `FILTER_NOT_SUPPORTED` (see [MetaImpressionQueryFunction]).
  */
 interface MetaEntityModule {
-  /** The request `entity_type` this module handles (e.g. "campaign"). */
-  val entityType: String
+  /**
+   * The request `entity_type` strings this module handles. A module may accept more than one (e.g.
+   * `"ad_set"` and `"adset"`) since the taxonomy string is chosen per-`DataProvider`.
+   */
+  val entityTypes: Set<String>
 
   /** Meta Insights `level` parameter for this node level (e.g. "campaign"). */
   val level: String
@@ -44,29 +47,44 @@ interface MetaEntityModule {
 
 /** `campaign` → `/{campaign-id}/insights?level=campaign`. */
 object CampaignModule : MetaEntityModule {
-  override val entityType: String = "campaign"
+  override val entityTypes: Set<String> = setOf("campaign")
   override val level: String = "campaign"
 }
 
+/** `ad` / `creative` (Meta's leaf ad node) → `/{ad-id}/insights?level=ad`. */
+object AdModule : MetaEntityModule {
+  override val entityTypes: Set<String> = setOf("ad", "creative")
+  override val level: String = "ad"
+}
+
+/** `ad_set` / `adset` → `/{adset-id}/insights?level=adset`. */
+object AdSetModule : MetaEntityModule {
+  override val entityTypes: Set<String> = setOf("ad_set", "adset")
+  override val level: String = "adset"
+}
+
+/** `account` / `ad_account` → `/act_{account-id}/insights?level=account`. */
+object AccountModule : MetaEntityModule {
+  override val entityTypes: Set<String> = setOf("account", "ad_account")
+  override val level: String = "account"
+
+  override fun nodeId(entityId: String): String = "$ACCOUNT_NODE_PREFIX$entityId"
+
+  private const val ACCOUNT_NODE_PREFIX = "act_"
+}
+
 /**
- * Registry of supported [MetaEntityModule]s keyed by `entity_type`.
+ * Registry of supported [MetaEntityModule]s keyed by every `entity_type` string they accept.
  *
- * Only `campaign` is supported today — the only entity type currently onboarded. Enable another
- * level by adding its module to the list below, e.g.:
- * ```
- * object AdSetModule : MetaEntityModule { entityType = "ad_set"; level = "adset" }
- * object AdModule : MetaEntityModule { entityType = "ad"; level = "ad" }
- * object AccountModule : MetaEntityModule {
- *   entityType = "account"; level = "account"; fun nodeId(id) = "act_$id"
- * }
- * ```
- *
- * Nothing else needs to change: the function routes on `entity_type` and the client uses [level] /
- * [nodeId] to build the request.
+ * Add a module to [MODULES] to support a new entity type; each module declares its own accepted
+ * `entity_type` strings (including aliases). An `entity_type` with no module is unsupported.
  */
 object MetaEntityModules {
+  private val MODULES: List<MetaEntityModule> =
+    listOf(CampaignModule, AdModule, AdSetModule, AccountModule)
+
   private val byEntityType: Map<String, MetaEntityModule> =
-    listOf(CampaignModule).associateBy { it.entityType }
+    MODULES.flatMap { module -> module.entityTypes.map { it to module } }.toMap()
 
   /** The module for [entityType], or null if the type is unsupported. */
   operator fun get(entityType: String): MetaEntityModule? = byEntityType[entityType]

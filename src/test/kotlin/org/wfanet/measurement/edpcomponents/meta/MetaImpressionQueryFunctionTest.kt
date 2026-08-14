@@ -168,6 +168,30 @@ class MetaImpressionQueryFunctionTest {
   }
 
   @Test
+  fun `routes supported entity types to their Meta Insights level`() {
+    // (entity_type, expected node id, expected level). Accounts prefix "act_".
+    val cases =
+      listOf(
+        Triple("campaign", "111", "campaign"),
+        Triple("ad", "111", "ad"),
+        Triple("creative", "111", "ad"),
+        Triple("ad_set", "111", "adset"),
+        Triple("adset", "111", "adset"),
+        Triple("account", "act_111", "account"),
+        Triple("ad_account", "act_111", "account"),
+      )
+    for ((entityType, expectedNodeId, expectedLevel) in cases) {
+      val fake = FakeMetaInsightsClient(result = 1L)
+
+      MetaImpressionQueryFunction(fake)
+        .handle(request(entityType = entityType, entityIds = listOf("111")))
+
+      assertThat(fake.lastTargets)
+        .containsExactly(MetaInsightsTarget(nodeId = expectedNodeId, level = expectedLevel))
+    }
+  }
+
+  @Test
   fun `skips with FILTER_NOT_SUPPORTED for a non-empty filter`() {
     val response =
       MetaImpressionQueryFunction(FakeMetaInsightsClient(result = 1L))
@@ -183,11 +207,11 @@ class MetaImpressionQueryFunctionTest {
 
     val response =
       MetaImpressionQueryFunction(fake)
-        .handle(request(entityType = "ad_set", entityIds = listOf("111")))
+        .handle(request(entityType = "playlist", entityIds = listOf("111")))
 
     assertThat(response.hasSkipped()).isTrue()
     assertThat(response.skipped.reason).isEqualTo(SkipReason.FILTER_NOT_SUPPORTED)
-    assertThat(response.skipped.detail).contains("ad_set")
+    assertThat(response.skipped.detail).contains("playlist")
     assertThat(fake.lastTargets).isNull()
   }
 
