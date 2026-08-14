@@ -60,6 +60,10 @@ import javax.crypto.spec.SecretKeySpec
  *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
  *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
+ *
+ * TODO(world-federation-of-advertisers/edp-components#3): Add a real Meta-sandbox integration test
+ *   confirming the `time_range`/timezone behavior, the age/gender bucket strings, and `level=ad` on
+ *   an ad node against live Meta.
  */
 class MetaMarketingApiInsightsClient(
   private val accessToken: String,
