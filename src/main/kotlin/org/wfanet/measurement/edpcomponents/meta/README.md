@@ -21,10 +21,14 @@ Bazel registry).
 ## Flow
 
 1. Parse the binary-proto request.
-2. `resolveCampaignIds` — `event_group_reference_id` (the `entity_id`) → Meta campaign ID(s).
+2. `MetaEntityModules` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
+   `level`: `campaign`, `ad`/`creative` → `ad`, `ad_set`/`adset` → `adset`, `account`/`ad_account` →
+   `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — CEL `age_group`/`gender` → Meta `age`/`gender` breakdown buckets, or
    `FILTER_NOT_SUPPORTED`.
-4. `MetaInsightsClient` — Graph API Insights query (`breakdowns=age,gender`), sum matching buckets.
+4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, build the day-granular
+   `time_range`, query Graph API Insights (`breakdowns=age,gender`), follow paging, sum matching
+   buckets.
 5. Return the count, or a skip reason.
 
 ## Auth
@@ -32,18 +36,15 @@ Bazel registry).
 - Reporting Server → function: GCP OIDC ID token (handled upstream by `ValidationCloudFunctionClient`).
 - Meta System User token: **Secret Manager** only; never reaches the Reporting Server.
 
-## Status — scaffold (not yet production)
+## Status
 
-Implemented: request/response handling, skip-reason mapping, the `MetaInsightsClient` seam, the Graph
-API request skeleton.
+Implemented: request/response handling, entity-type routing for all four Meta Insights levels,
+Insights JSON parsing with paging, ad-account-timezone `time_range` conversion, `appsecret_proof` on
+every request, and skip-reason mapping.
 
 Open TODOs (tracked in code):
-- **`event_group_reference_id` → campaign ID** decode — needs the onboarding encoding (currently a
-  pass-through).
-- **CEL → breakdown** translation for `age_group` + `gender` — currently only the unfiltered case is
-  supported; filtered queries return `FILTER_NOT_SUPPORTED`.
-- **Insights JSON parsing** + paging, and a **JSON dependency** decision.
-- **Secret Manager** token loading (currently an env-var fallback for local/testing).
-- **Async Insights** report-run path for large queries (design "future work").
-- **Bazel/deploy wiring** — `MODULE.bazel` deps and the Gen-2 deploy target need a build pass and
-  reconciliation with edp-components' conventions.
+- **CEL → breakdown** translation for `age_group` + `gender` — only the unfiltered case is supported
+  today; filtered queries return `FILTER_NOT_SUPPORTED`.
+- **Async Insights** report-run path for large queries.
+- **Gen-2 deploy target** — `java_binary` + container image.
+- **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.

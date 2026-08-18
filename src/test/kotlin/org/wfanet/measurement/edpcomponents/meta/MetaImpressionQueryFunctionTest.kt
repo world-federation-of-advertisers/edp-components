@@ -124,6 +124,12 @@ class MetaImpressionQueryFunctionTest {
     override fun getWriter(): BufferedWriter = output.bufferedWriter()
   }
 
+  private data class RoutingCase(
+    val entityType: String,
+    val expectedNodeId: String,
+    val expectedLevel: String,
+  )
+
   @Test
   fun `service parses the request, sets the protobuf content type, and writes the response bytes`() {
     val fake = FakeMetaInsightsClient(result = 999L)
@@ -169,16 +175,16 @@ class MetaImpressionQueryFunctionTest {
 
   @Test
   fun `routes supported entity types to their Meta Insights level`() {
-    // (entity_type, expected node id, expected level). Accounts prefix "act_".
+    // Accounts prefix "act_".
     val cases =
       listOf(
-        Triple("campaign", "111", "campaign"),
-        Triple("ad", "111", "ad"),
-        Triple("creative", "111", "ad"),
-        Triple("ad_set", "111", "adset"),
-        Triple("adset", "111", "adset"),
-        Triple("account", "act_111", "account"),
-        Triple("ad_account", "act_111", "account"),
+        RoutingCase("campaign", expectedNodeId = "111", expectedLevel = "campaign"),
+        RoutingCase("ad", expectedNodeId = "111", expectedLevel = "ad"),
+        RoutingCase("creative", expectedNodeId = "111", expectedLevel = "ad"),
+        RoutingCase("ad_set", expectedNodeId = "111", expectedLevel = "adset"),
+        RoutingCase("adset", expectedNodeId = "111", expectedLevel = "adset"),
+        RoutingCase("account", expectedNodeId = "act_111", expectedLevel = "account"),
+        RoutingCase("ad_account", expectedNodeId = "act_111", expectedLevel = "account"),
       )
     for ((entityType, expectedNodeId, expectedLevel) in cases) {
       val fake = FakeMetaInsightsClient(result = 1L)
