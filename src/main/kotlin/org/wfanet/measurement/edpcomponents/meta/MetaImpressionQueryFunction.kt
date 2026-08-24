@@ -34,7 +34,7 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  *
  * A **dumb publisher-API adapter** (design doc §7): it parses a
  * [DataProviderImpressionQueryRequest] (binary proto), routes each entity key to a Meta Insights
- * target by its `entity_type` (via [MetaEntityModules]), translates the CEL filter to a Meta
+ * target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to a Meta
  * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
  * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
  * comparison, no verdict, and no callback — that all lives in the Reporting Server's
@@ -80,14 +80,18 @@ class MetaImpressionQueryFunction(
     // valid smaller one.
     val targets = ArrayList<MetaInsightsTarget>(request.query.entityKeysList.size)
     for (entityKey in request.query.entityKeysList) {
-      val module =
-        MetaEntityModules[entityKey.entityType]
+      val entityLevel =
+        MetaEntityLevels[entityKey.entityType]
           ?: return skip(
             request.requestId,
             SkipReason.FILTER_NOT_SUPPORTED,
             "unsupported entity_type: ${entityKey.entityType}",
           )
-      targets += MetaInsightsTarget(module.nodeId(entityKey.entityId), module.level)
+      targets +=
+        MetaInsightsTarget(
+          nodeId = "${entityLevel.nodeIdPrefix}${entityKey.entityId}",
+          level = entityLevel.level,
+        )
     }
 
     return try {

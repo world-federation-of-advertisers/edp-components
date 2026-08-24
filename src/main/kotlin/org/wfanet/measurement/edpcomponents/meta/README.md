@@ -21,11 +21,11 @@ Bazel registry).
 ## Flow
 
 1. Parse the binary-proto request.
-2. `MetaEntityModules` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
+2. `MetaEntityLevels` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
    `level`: `campaign`, `ad`/`creative` → `ad`, `ad_set`/`adset` → `adset`, `account`/`ad_account` →
    `account` (node prefixed `act_`). An unknown type skips the request.
-3. `translateFilter` — CEL `age_group`/`gender` → Meta `age`/`gender` breakdown buckets, or
-   `FILTER_NOT_SUPPORTED`.
+3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
+   `FILTER_NOT_SUPPORTED`. Age/gender breakdown translation is tracked as a TODO (see Status).
 4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, build the day-granular
    `time_range`, query Graph API Insights (`breakdowns=age,gender`), follow paging, sum matching
    buckets.

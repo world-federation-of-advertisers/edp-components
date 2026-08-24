@@ -313,6 +313,39 @@ class MetaMarketingApiInsightsClientTest {
     }
   }
 
+  @Test
+  fun `computes appsecret_proof as the HMAC-SHA256 of the access token keyed by the app secret`() {
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"1"}]}""")
+
+    client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+
+    // HMAC-SHA256(key=APP_SECRET, data=ACCESS_TOKEN) as lowercase hex. Pinned to a known digest so
+    // a swapped key/data pair or a wrong charset fails here rather than on the first real Meta
+    // call — which would not happen until the sandbox test in #3.
+    assertThat(insightsQueryDecoded())
+      .contains("appsecret_proof=4bd72343ca044f8aab1d98f07606cdb1cf47df0c089ff7b5b2df44e40d869970")
+  }
+
+  @Test
+  fun `url-encodes a node ID containing query-delimiter characters`() {
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"7"}]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(MetaInsightsTarget(nodeId = "111&level=account", level = "campaign")),
+          alignedInterval(),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(7L)
+    // The delimiters must stay inside the path segment rather than becoming a second query
+    // parameter: an unencoded node ID would let a caller-supplied ID inject `level=account` and
+    // silently change the aggregation level the count is computed at.
+    assertThat(insightsRequest().rawPath).isEqualTo("/$API_VERSION/111%26level%3Daccount/insights")
+    assertThat(insightsQueryDecoded()).contains("level=campaign")
+  }
+
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
 
   private fun alignedInterval() = interval {

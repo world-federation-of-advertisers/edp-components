@@ -24,7 +24,7 @@ import com.google.type.Interval
  * This is the only part of the Meta cloud function that talks to Meta. It is intentionally narrow:
  * given already-resolved Insights [targets][MetaInsightsTarget] (Graph node ID + aggregation
  * `level`), a time interval, and a demographic breakdown filter, it returns the summed impression
- * count. Resolving the request's entity keys to targets (via [MetaEntityModule]) and the CEL filter
+ * count. Resolving the request's entity keys to targets (via [MetaEntityLevels]) and the CEL filter
  * to [MetaDemographicFilter] happens upstream in [MetaImpressionQueryFunction].
  */
 interface MetaInsightsClient {
@@ -54,7 +54,7 @@ data class MetaInsightsTarget(val nodeId: String, val level: String)
  * A demographic slice expressed in Meta's fixed breakdown dimensions. An empty set means "no
  * restriction on that dimension" (i.e. all buckets). A non-empty set restricts to those buckets,
  * which are summed. This is what a supported CEL filter translates to; anything that cannot be
- * expressed here is [FILTER_NOT_SUPPORTED][SkipTranslation].
+ * expressed here is skipped with `FILTER_NOT_SUPPORTED` (see [MetaImpressionQueryFunction]).
  */
 data class MetaDemographicFilter(
   val ages: Set<MetaAgeBracket> = emptySet(),
