@@ -1,0 +1,31 @@
+load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_library", "kt_jvm_proto_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Kotlin codegen for the impression-query contract. The API repo ships only the proto_library, so
+# the consumer generates the Kotlin from it.
+kt_jvm_proto_library(
+    name = "data_provider_impression_query_kt_jvm_proto",
+    deps = [
+        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:data_provider_impression_query_proto",
+    ],
+)
+
+kt_jvm_library(
+    name = "meta_impression_query",
+    srcs = [
+        "MetaEntityLevel.kt",
+        "MetaImpressionQueryFunction.kt",
+        "MetaInsightsClient.kt",
+        "MetaMarketingApiInsightsClient.kt",
+    ],
+    deps = [
+        ":data_provider_impression_query_kt_jvm_proto",
+        "@wfa_common_jvm//imports/java/com/google/cloud/functions:functions_framework_api",
+        "@wfa_common_jvm//imports/java/com/google/gson",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+    ],
+)
+
+# TODO(@jojijacob): Add the Gen-2 deploy target (functions-framework invoker + container image)
+# mirroring cross-media-measurement's cloud-function deploy pattern.

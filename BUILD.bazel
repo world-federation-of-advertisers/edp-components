@@ -1,0 +1,2 @@
+# Root package. Marks the repository root so the Maven lock file (//:maven_install.json) resolves.
+exports_files(["maven_install.json"])

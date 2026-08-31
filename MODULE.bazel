@@ -1,0 +1,46 @@
+module(
+    name = "edp-components",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "protobuf", version = "33.1")
+bazel_dep(name = "rules_java", version = "8.15.2")
+bazel_dep(name = "rules_jvm_external", version = "6.8")
+bazel_dep(name = "rules_kotlin_jvm", version = "0.13.0", repo_name = "wfa_rules_kotlin_jvm")
+bazel_dep(name = "common-jvm", version = "0.144.0", repo_name = "wfa_common_jvm")
+bazel_dep(
+    name = "cross-media-measurement-api",
+    version = "0.95.0",
+    repo_name = "cross_media_measurement_api",
+)
+
+# common-jvm/protobuf/rules_kotlin_jvm all contribute to the shared `maven` repo; declare them so
+# rules_jvm_external aggregates their locks correctly (avoids the multi-module lock-file error).
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    artifacts = [
+        "com.google.cloud.functions:functions-framework-api:1.1.0",
+        "com.google.code.gson:gson:2.12.1",
+        "com.google.guava:guava:33.4.0-jre",
+        "com.google.truth:truth:1.4.4",
+        "junit:junit:4.13.2",
+        "org.jetbrains.kotlin:kotlin-reflect:2.2.21",
+        "org.jetbrains.kotlin:kotlin-test:2.2.21",
+    ],
+    fail_if_repin_required = False,
+    fetch_sources = True,
+    known_contributing_modules = [
+        "common-jvm",
+        "edp-components",
+        "protobuf",
+        "rules_kotlin_jvm",
+    ],
+    lock_file = "//:maven_install.json",
+    repositories = [
+        "https://maven-central.storage-download.googleapis.com/maven2",
+        "https://repo1.maven.org/maven2",
+    ],
+    resolver = "maven",
+)
+use_repo(maven, "maven")

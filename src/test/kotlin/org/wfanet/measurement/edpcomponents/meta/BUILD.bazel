@@ -1,0 +1,29 @@
+load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_test")
+
+kt_jvm_test(
+    name = "MetaImpressionQueryFunctionTest",
+    srcs = ["MetaImpressionQueryFunctionTest.kt"],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@wfa_common_jvm//imports/java/com/google/common/truth",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@wfa_common_jvm//imports/java/org/junit",
+        "@wfa_common_jvm//imports/kotlin/kotlin/test",
+    ],
+)
+
+kt_jvm_test(
+    name = "MetaMarketingApiInsightsClientTest",
+    srcs = ["MetaMarketingApiInsightsClientTest.kt"],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.MetaMarketingApiInsightsClientTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@wfa_common_jvm//imports/java/com/google/common/truth",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@wfa_common_jvm//imports/java/org/junit",
+        "@wfa_common_jvm//imports/kotlin/kotlin/test",
+    ],
+)
