@@ -1,0 +1,58 @@
+# Copyright 2026 The Cross-Media Measurement Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Build and test
+
+on:
+  push:
+    branches:
+      - main
+      - 'releases/**'
+  pull_request:
+    branches:
+      - main
+      - 'releases/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Bazel
+        uses: world-federation-of-advertisers/actions/setup-bazel@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
+
+      - name: Build
+        run: bazel build //...
+
+      # Live-Meta tests carry the `manual` tag and are excluded from //... by Bazel, so this
+      # never reaches the Marketing API and needs no credentials.
+      - name: Run tests
+        id: run-tests
+        run: bazel test //... --test_output=errors
+
+      - name: Upload Bazel testlogs
+        continue-on-error: true
+        uses: world-federation-of-advertisers/actions/bazel-upload-testlogs@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
+        if: failure() && steps.run-tests.outcome == 'failure'
