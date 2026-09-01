@@ -1,3 +1,4 @@
+load("@rules_java//java:java_binary.bzl", "java_binary")
 load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_library", "kt_jvm_proto_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -27,5 +28,22 @@ kt_jvm_library(
     ],
 )
 
-# TODO(@jojijacob): Add the Gen-2 deploy target (functions-framework invoker + container image)
-# mirroring cross-media-measurement's cloud-function deploy pattern.
+# Deployable artifact. `bazel build` on this target produces
+# MetaImpressionQueryFunction_deploy.jar — the uber jar (this code plus every runtime dependency)
+# that `gcloud functions deploy --gen2` uploads.
+#
+# There is no main(); the Cloud Functions runtime supplies the functions-framework server and
+# invokes MetaImpressionQueryFunction.service() per request. `main_class` is required by
+# java_binary but unused at deploy time — the runtime dispatches on the deploy-time
+# `--entry-point` flag instead. Mirrors the cloud-function targets in cross-media-measurement.
+#
+# Deploy (see README):
+#   bazel build //src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaImpressionQueryFunction_deploy.jar
+#   gcloud functions deploy <name> --gen2 --runtime=java17 \
+#     --entry-point=org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunction \
+#     --source=<staging dir containing only the jar> --trigger-http --no-allow-unauthenticated
+java_binary(
+    name = "MetaImpressionQueryFunction",
+    main_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunction",
+    runtime_deps = [":meta_impression_query"],
+)
