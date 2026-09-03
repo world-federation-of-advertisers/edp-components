@@ -32,6 +32,7 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
+import java.util.logging.Logger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -219,15 +220,60 @@ class MetaMarketingApiInsightsClient(
           HttpResponse.BodyHandlers.ofString(),
         )
       } catch (e: Exception) {
+        // The cause may carry the request URI, which contains the access token. Never log `e`
+        // directly; it is attached as a cause for the caller to handle, not for this class to emit.
         throw MetaApiException("Marketing API request failed for $nodeForError", e)
       }
-    return when (val status = response.statusCode()) {
-      in 200..299 -> response.body()
-      404 -> throw MetaEntityNotFoundException("Meta node $nodeForError not found")
-      else ->
+
+    logThrottleHeaders(response, nodeForError)
+
+    val status = response.statusCode()
+    if (status in 200..299) return response.body()
+    if (status == 404) throw MetaEntityNotFoundException("Meta node $nodeForError not found")
+
+    // Classify by the error object's `code`, not by HTTP status. Meta returns 400 for throttling,
+    // expired tokens, and malformed requests alike, so status cannot tell them apart.
+    val error: MetaError? = parseErrorOrNull(response.body())
+    when {
+      error == null ->
         throw MetaApiException(
           "Marketing API returned $status for $nodeForError: ${response.body().take(500)}"
         )
+      error.isRateLimit ->
+        throw MetaRateLimitException(
+          "Marketing API throttled for $nodeForError. ${error.describe(nodeForError)}. " +
+            "Quota headers: ${throttleHeadersOf(response)}"
+        )
+      error.isAuthFailure ->
+        throw MetaAuthException(
+          "Marketing API rejected credentials. ${error.describe(nodeForError)}"
+        )
+      else -> throw MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
+    }
+  }
+
+  private fun parseErrorOrNull(body: String): MetaError? =
+    try {
+      gson.fromJson(body, InsightsPage::class.java)?.error
+    } catch (e: JsonSyntaxException) {
+      null
+    }
+
+  private fun throttleHeadersOf(response: HttpResponse<*>) =
+    ThrottleHeaders(
+      businessUseCase = response.headers().firstValue(BUSINESS_USE_CASE_USAGE_HEADER).orElse(null),
+      insightsThrottle = response.headers().firstValue(INSIGHTS_THROTTLE_HEADER).orElse(null),
+      appUsage = response.headers().firstValue(APP_USAGE_HEADER).orElse(null),
+    )
+
+  /**
+   * Logs Meta's quota headers. These are the only way to see throttling approaching — and to read
+   * `ads_api_access_tier`, which caps Insights volume — before requests start being rejected.
+   */
+  private fun logThrottleHeaders(response: HttpResponse<*>, nodeForError: String) {
+    val headers = throttleHeadersOf(response)
+    if (!headers.isEmpty()) {
+      logger.fine { "Meta quota for $nodeForError: $headers" }
     }
   }
 
@@ -254,10 +300,15 @@ class MetaMarketingApiInsightsClient(
   }
 
   // Meta sometimes embeds an error object in an HTTP 200 body; treating that as zero impressions
-  // would be a silent wrong answer, so any present error is raised.
+  // would be a silent wrong answer, so any present error is raised — classified by `code`, as on
+  // the non-2xx path, so a throttle is never mistaken for an ordinary failure.
   private fun MetaError?.throwIfPresent(nodeForError: String) {
-    if (this != null) {
-      throw MetaApiException("Meta returned error for $nodeForError: $message (code $code)")
+    if (this == null) return
+    throw when {
+      isRateLimit -> MetaRateLimitException("Marketing API throttled. ${describe(nodeForError)}")
+      isAuthFailure ->
+        MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
+      else -> MetaApiException(describe(nodeForError))
     }
   }
 
@@ -299,8 +350,42 @@ class MetaMarketingApiInsightsClient(
   private data class MetaError(
     val message: String? = null,
     val code: Long? = null,
+    @SerializedName("error_subcode") val subcode: Long? = null,
     val type: String? = null,
-  )
+    @SerializedName("fbtrace_id") val fbtraceId: String? = null,
+  ) {
+    /**
+     * Meta signals Business Use Case throttling with HTTP 400 and one of these codes — not with
+     * HTTP 429, which the Marketing API never returns. Status alone therefore cannot distinguish a
+     * throttle from a malformed request, and `type` is not stable across errors (the same `code`
+     * arrives as `OAuthException` or `GraphMethodException` depending on the call), so `code` is
+     * the only field to branch on.
+     */
+    val isRateLimit: Boolean
+      get() = code in RATE_LIMIT_CODES
+
+    /** Token expired, revoked, or otherwise invalid. Not transient; retrying cannot help. */
+    val isAuthFailure: Boolean
+      get() = code == AUTH_ERROR_CODE
+
+    fun describe(nodeForError: String): String =
+      "Meta returned error for $nodeForError: $message " +
+        "(code=$code subcode=$subcode type=$type fbtrace_id=$fbtraceId)"
+  }
+
+  /** Response headers Meta uses to report quota consumption. Logged so throttling is visible. */
+  private data class ThrottleHeaders(
+    val businessUseCase: String?,
+    val insightsThrottle: String?,
+    val appUsage: String?,
+  ) {
+    fun isEmpty(): Boolean =
+      businessUseCase == null && insightsThrottle == null && appUsage == null
+
+    override fun toString(): String =
+      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase " +
+        "$INSIGHTS_THROTTLE_HEADER=$insightsThrottle $APP_USAGE_HEADER=$appUsage"
+  }
 
   companion object {
     private const val GRAPH_API_BASE = "https://graph.facebook.com"
@@ -313,5 +398,27 @@ class MetaMarketingApiInsightsClient(
     // v25.0 (released 2026-02-18) is the current Graph API version per Meta's changelog:
     // https://developers.facebook.com/docs/graph-api/changelog
     private const val DEFAULT_API_VERSION = "v25.0"
+
+    // Business Use Case throttling codes. Meta returns HTTP 400 for all of these, so they are
+    // indistinguishable from ordinary request errors by status alone.
+    // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
+    private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
+    private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
+    private const val PAGE_RATE_LIMIT_CODE = 80001L
+    private val RATE_LIMIT_CODES =
+      setOf(ADS_INSIGHTS_RATE_LIMIT_CODE, ADS_MANAGEMENT_RATE_LIMIT_CODE, PAGE_RATE_LIMIT_CODE)
+
+    /** Expired/invalid access token. */
+    private const val AUTH_ERROR_CODE = 190L
+
+    // Quota headers. `X-Business-Use-Case-Usage` also carries `ads_api_access_tier`, which
+    // determines the Insights ceiling: `development_access` allows 600 + 400/active-ad per account
+    // per hour, `standard_access` 190,000 + 400/active-ad. Logged so the tier and the approach of a
+    // limit are both observable before requests start failing.
+    private const val BUSINESS_USE_CASE_USAGE_HEADER = "x-business-use-case-usage"
+    private const val INSIGHTS_THROTTLE_HEADER = "x-fb-ads-insights-throttle"
+    private const val APP_USAGE_HEADER = "x-app-usage"
+
+    private val logger: Logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
   }
 }

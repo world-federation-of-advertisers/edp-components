@@ -346,6 +346,103 @@ class MetaMarketingApiInsightsClientTest {
     assertThat(insightsQueryDecoded()).contains("level=campaign")
   }
 
+  @Test
+  fun `classifies an Ads Insights throttle as MetaRateLimitException, not a generic API error`() {
+    // Meta signals Business Use Case throttling with HTTP 400 and code 80000 — never HTTP 429,
+    // which the Marketing API does not return. Status alone cannot distinguish this from a
+    // malformed request, so classification has to come from `code`.
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"(#80000) There have been too many calls from this ad-account.",
+             "type":"OAuthException","code":80000,"error_subcode":2446079,
+             "fbtrace_id":"AbC123"}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `a throttled response never sums to zero impressions`() {
+    // The failure mode this guards against: a throttle that degrades to a skip looks identical to
+    // a campaign that genuinely did not deliver. Today the day-alignment guard means requests
+    // rarely reach Meta at all, so throttling is not yet observable — that coupling is
+    // load-bearing and undocumented. When the interval handling is fixed (#4) and real volume
+    // starts flowing, a throttle misread as zero would silently under-report a live advertiser.
+    insightsResponses =
+      listOf(
+        400 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isInstanceOf(MetaApiException::class.java)
+  }
+
+  @Test
+  fun `classifies an expired token as MetaAuthException`() {
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"Error validating access token: Session has expired.",
+             "type":"OAuthException","code":190,"error_subcode":463}}"""
+      )
+
+    assertFailsWith<MetaAuthException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `an ordinary bad request stays a plain MetaApiException`() {
+    // Same HTTP status as the throttle and the expired token above; only `code` differs.
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"(#100) bad field","type":"OAuthException","code":100}}"""
+      )
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    assertThat(failure).isNotInstanceOf(MetaAuthException::class.java)
+  }
+
+  @Test
+  fun `classifies a throttle embedded in a 200 body`() {
+    // Meta also embeds errors in successful responses; that path must classify identically.
+    insightsResponses =
+      listOf(
+        200 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `surfaces fbtrace_id in the error message`() {
+    // Meta support asks for fbtrace_id first; losing it makes an escalation much slower.
+    insightsResponses =
+      listOf(400 to """{"error":{"message":"boom","code":100,"fbtrace_id":"TRACE-XYZ"}}""")
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("TRACE-XYZ")
+  }
+
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
 
   private fun alignedInterval() = interval {
