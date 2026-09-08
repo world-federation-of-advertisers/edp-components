@@ -28,6 +28,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.util.UUID
+import java.util.logging.Logger
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
@@ -51,7 +52,7 @@ import org.wfanet.measurement.api.v2alpha.impressionQuery
  * Tagged `manual` and skipped via [assumeTrue] when unconfigured, so it never runs in CI.
  *
  * The request is built here rather than by hand because the body is binary protobuf — there is
- * otherwise no practical way to produce one for `curl`. Setting `META_TEST_WRITE_REQUEST_TO` dumps
+ * otherwise no practical way to produce one for `curl`. Setting `META_TEST_WRITE_REQUEST_TO` writes
  * the serialised bytes to a file so the same request can be replayed outside this test:
  * ```
  * curl -X POST "$URL" \
@@ -98,9 +99,10 @@ class DeployedFunctionTest {
   @Test
   fun `deployed function answers an impression query over HTTPS`() {
     val request: DataProviderImpressionQueryRequest = buildRequest()
-    writeRequestTo?.takeIf { it.isNotEmpty() }?.let { path ->
-      Files.write(Path.of(path), request.toByteArray())
-      println("Wrote serialised request to $path (${request.toByteArray().size} bytes)")
+    if (!writeRequestTo.isNullOrEmpty()) {
+      val bytes = request.toByteArray()
+      Files.write(Path.of(writeRequestTo), bytes)
+      logger.info("Wrote serialised request to $writeRequestTo (${bytes.size} bytes)")
     }
 
     val response: HttpResponse<ByteArray> =
@@ -120,7 +122,7 @@ class DeployedFunctionTest {
           HttpResponse.BodyHandlers.ofByteArray(),
         )
 
-    println("HTTP ${response.statusCode()} from $functionUrl")
+    logger.info("HTTP ${response.statusCode()} from $functionUrl")
     assertThat(response.statusCode()).isEqualTo(200)
 
     val queryResponse = DataProviderImpressionQueryResponse.parseFrom(response.body())
@@ -129,7 +131,7 @@ class DeployedFunctionTest {
     when {
       queryResponse.hasResult() -> {
         val count = queryResponse.result.value
-        println("RESULT: impressions=$count")
+        logger.info("RESULT: impressions=$count")
         assertThat(count).isAtLeast(0L)
         if (!expectedImpressions.isNullOrEmpty()) {
           assertThat(count).isEqualTo(expectedImpressions.toLong())
@@ -139,7 +141,7 @@ class DeployedFunctionTest {
         // A skip is a valid answer, not a failure. FILTER_NOT_SUPPORTED on a UTC-aligned window is
         // the known interval limitation (#4), and reaching it still proves the whole transport,
         // auth, and secret-injection path worked.
-        println(
+        logger.info(
           "SKIPPED: ${queryResponse.skipped.reason} — ${queryResponse.skipped.detail}\n" +
             "  (a skip still exercises transport, OIDC and secret injection; " +
             "FILTER_NOT_SUPPORTED on a UTC window is edp-components#4, not a defect)"
@@ -157,7 +159,6 @@ class DeployedFunctionTest {
       checkNotNull(MetaEntityLevels[entityType]) {
         "META_TEST_ENTITY_TYPE '$entityType' is not a supported entity type"
       }
-    check(level.level.isNotEmpty())
     return dataProviderImpressionQueryRequest {
       // Deterministic per (entity, interval) so replaying the same request is idempotent from
       // Meta's perspective, matching how EdpValidationPostProcessor derives its request IDs.
@@ -182,6 +183,8 @@ class DeployedFunctionTest {
   }
 
   companion object {
+    private val logger: Logger = Logger.getLogger(DeployedFunctionTest::class.java.name)
+
     private const val CONTENT_TYPE_PROTOBUF = "application/x-protobuf"
     private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
     // Generous: a cold start plus several sequential Graph round trips.
