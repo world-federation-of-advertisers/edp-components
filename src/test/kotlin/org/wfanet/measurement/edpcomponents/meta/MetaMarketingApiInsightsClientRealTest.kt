@@ -20,6 +20,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.timestamp
 import com.google.type.interval
 import java.time.Instant
+import java.util.logging.Logger
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
@@ -92,8 +93,8 @@ class MetaMarketingApiInsightsClientRealTest {
     val count: Long =
       client.queryImpressions(listOf(target), timeInterval, MetaDemographicFilter.UNFILTERED)
 
-    // Printed so a manual run is useful even without an expected value to assert against.
-    println(
+    // Logged so a manual run is useful even without an expected value to assert against.
+    logger.info(
       "Live Meta query: node=${target.nodeId} level=${target.level} " +
         "interval=[${Instant.ofEpochSecond(startEpochSeconds!!.toLong())}, " +
         "${Instant.ofEpochSecond(endEpochSeconds!!.toLong())}) -> impressions=$count"
@@ -105,5 +106,10 @@ class MetaMarketingApiInsightsClientRealTest {
     if (!expectedImpressions.isNullOrEmpty()) {
       assertThat(count).isEqualTo(expectedImpressions.toLong())
     }
+  }
+
+  companion object {
+    private val logger: Logger =
+      Logger.getLogger(MetaMarketingApiInsightsClientRealTest::class.java.name)
   }
 }
