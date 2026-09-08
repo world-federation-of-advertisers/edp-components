@@ -2,3 +2,13 @@
 *.swp
 .ijwb/
 .idea/
+
+# Terraform. State can contain resolved resource values, and tfvars carries
+# environment-specific configuration; neither belongs in the repository. The
+# .example template is committed as documentation.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
