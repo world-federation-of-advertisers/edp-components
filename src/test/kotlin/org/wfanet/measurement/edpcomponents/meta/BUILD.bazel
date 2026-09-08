@@ -28,9 +28,7 @@ kt_jvm_test(
     ],
 )
 
-# Hits the live Meta Marketing API, so it is tagged `manual`: excluded from `bazel test //...`
-# and never run by CI. It also self-skips when its environment variables are unset. Run it
-# explicitly by target name with --test_env; see the meta README.
+# Manual: hits the live Meta Marketing API. See README.md.
 kt_jvm_test(
     name = "MetaMarketingApiInsightsClientRealTest",
     srcs = ["MetaMarketingApiInsightsClientRealTest.kt"],
