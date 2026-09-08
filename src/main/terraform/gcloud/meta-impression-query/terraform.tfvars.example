@@ -13,11 +13,6 @@ terraform_service_account = "REPLACE_ME@REPLACE_ME.iam.gserviceaccount.com"
 # then copy the jar into a directory containing nothing else — gcloud uploads the whole directory.
 uber_jar_path = "/tmp/meta-cf-staging/MetaImpressionQueryFunction_deploy.jar"
 
-# Must already exist in Secret Manager. This configuration grants read access; it does not
-# create them.
-meta_access_token_secret_id = "meta-access-token"
-meta_app_secret_secret_id   = "meta-app-secret"
-
 # TODO: the Reporting Server's service account. Leave empty for a manual smoke test, where you
 # invoke with your own identity via `gcloud auth print-identity-token`.
 invoker_service_accounts = []
