@@ -14,9 +14,7 @@ kt_jvm_test(
     ],
 )
 
-# Hits a deployed Cloud Function over HTTPS, so it is tagged `manual`: excluded from
-# `bazel test //...` and never run by CI. It also self-skips when its environment variables are
-# unset. See the meta README for how to run it against a deployment.
+# Manual: hits a deployed Cloud Function. See README.md.
 kt_jvm_test(
     name = "DeployedFunctionTest",
     srcs = ["DeployedFunctionTest.kt"],
