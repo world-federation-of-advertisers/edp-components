@@ -227,28 +227,40 @@ class MetaMarketingApiInsightsClient(
 
     logThrottleHeaders(response, nodeForError)
 
-    val status = response.statusCode()
-    if (status in 200..299) return response.body()
-    if (status == 404) throw MetaEntityNotFoundException("Meta node $nodeForError not found")
+    return when (val status = response.statusCode()) {
+      in 200..299 -> response.body()
+      else -> throw exceptionFor(status, response, nodeForError)
+    }
+  }
 
-    // Classify by the error object's `code`, not by HTTP status. Meta returns 400 for throttling,
-    // expired tokens, and malformed requests alike, so status cannot tell them apart.
+  /**
+   * Maps a non-success response to the most specific exception it identifies.
+   *
+   * Ordered by precedence, and driven by the error object's `code` rather than the HTTP status:
+   * Meta answers throttling, expired credentials, and malformed requests all with 400, so status
+   * alone cannot separate them. A recognised `code` therefore wins over status, leaving status as
+   * the fallback for responses that carry no usable error object.
+   */
+  private fun exceptionFor(
+    status: Int,
+    response: HttpResponse<String>,
+    nodeForError: String,
+  ): Exception {
     val error: MetaError? = parseErrorOrNull(response.body())
-    when {
-      error == null ->
-        throw MetaApiException(
-          "Marketing API returned $status for $nodeForError: ${response.body().take(500)}"
-        )
-      error.isRateLimit ->
-        throw MetaRateLimitException(
+    return when {
+      error?.isRateLimit == true ->
+        MetaRateLimitException(
           "Marketing API throttled for $nodeForError. ${error.describe(nodeForError)}. " +
             "Quota headers: ${throttleHeadersOf(response)}"
         )
-      error.isAuthFailure ->
-        throw MetaAuthException(
-          "Marketing API rejected credentials. ${error.describe(nodeForError)}"
+      error?.isAuthFailure == true ->
+        MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
+      status == 404 -> MetaEntityNotFoundException("Meta node $nodeForError not found")
+      error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
+      else ->
+        MetaApiException(
+          "Marketing API returned $status for $nodeForError: ${response.body().take(500)}"
         )
-      else -> throw MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
     }
   }
 
