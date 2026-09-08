@@ -411,10 +411,8 @@ class MetaMarketingApiInsightsClient(
 
     private const val AUTH_ERROR_CODE = 190L
 
-    // Quota headers. `X-Business-Use-Case-Usage` also carries `ads_api_access_tier`, which
-    // determines the Insights ceiling: `development_access` allows 600 + 400/active-ad per account
-    // per hour, `standard_access` 190,000 + 400/active-ad. Logged so the tier and the approach of a
-    // limit are both observable before requests start failing.
+    // Logged so quota consumption and `ads_api_access_tier` are visible before requests start
+    // being rejected.
     private const val BUSINESS_USE_CASE_USAGE_HEADER = "x-business-use-case-usage"
     private const val INSIGHTS_THROTTLE_HEADER = "x-fb-ads-insights-throttle"
     private const val APP_USAGE_HEADER = "x-app-usage"

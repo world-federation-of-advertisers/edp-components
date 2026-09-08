@@ -101,9 +101,8 @@ open class MetaApiException(message: String, cause: Throwable? = null) : Excepti
  * (Ads Insights), 80004 (Ads Management), or 80001 (Page) — never HTTP 429, which the
  * Marketing API does not return. Status alone cannot distinguish a throttle from a bad request.
  *
- * Do not retry with exponential backoff: retrying while throttled extends Meta's
- * `estimated_time_to_regain_access`. The correct response is to stop calling for the affected ad
- * account until the window reported in `X-Business-Use-Case-Usage` has elapsed.
+ * Handling is to wait out the window for the affected ad account rather than retrying:
+ * `X-Business-Use-Case-Usage` carries `estimated_time_to_regain_access` for that purpose.
  */
 class MetaRateLimitException(message: String, cause: Throwable? = null) :
   MetaApiException(message, cause)
