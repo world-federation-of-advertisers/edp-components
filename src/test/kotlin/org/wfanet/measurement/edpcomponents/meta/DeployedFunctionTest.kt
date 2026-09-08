@@ -1,0 +1,190 @@
+/*
+ * Copyright 2026 The Cross-Media Measurement Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.wfanet.measurement.edpcomponents.meta
+
+import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
+import com.google.protobuf.timestamp
+import com.google.type.interval
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Duration
+import java.util.UUID
+import org.junit.Assume.assumeTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.JUnit4
+import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
+import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
+import org.wfanet.measurement.api.v2alpha.impressionQuery
+
+/**
+ * Exercises a **deployed** Cloud Function over HTTPS, end to end.
+ *
+ * [MetaMarketingApiInsightsClientRealTest] proves the client talks to Meta correctly. This proves
+ * the layer above it: that the deployed function parses a binary-proto request off the wire,
+ * authenticates the caller, runs the query, and serialises a response back. It is the only test
+ * that covers the functions-framework entry point, OIDC enforcement, and secret injection, none of
+ * which exist outside a real deployment.
+ *
+ * Tagged `manual` and skipped via [assumeTrue] when unconfigured, so it never runs in CI.
+ *
+ * The request is built here rather than by hand because the body is binary protobuf — there is
+ * otherwise no practical way to produce one for `curl`. Setting `META_TEST_WRITE_REQUEST_TO` dumps
+ * the serialised bytes to a file so the same request can be replayed outside this test:
+ * ```
+ * curl -X POST "$URL" \
+ *   -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+ *   -H "Content-Type: application/x-protobuf" \
+ *   --data-binary @/tmp/request.pb --output /tmp/response.pb
+ * ```
+ *
+ * **The interval must be whole days in the ad account's timezone.** A UTC-aligned window is
+ * answered with a `FILTER_NOT_SUPPORTED` skip rather than a count — expected behaviour today (see
+ * edp-components#4), and reported as such rather than as a failure.
+ */
+@RunWith(JUnit4::class)
+class DeployedFunctionTest {
+
+  private val functionUrl: String? = System.getenv("META_TEST_FUNCTION_URL")
+  private val idToken: String? = System.getenv("META_TEST_ID_TOKEN")
+  private val entityId: String? = System.getenv("META_TEST_ENTITY_ID")
+  private val entityType: String = System.getenv("META_TEST_ENTITY_TYPE") ?: "campaign"
+  private val startEpochSeconds: String? = System.getenv("META_TEST_START_EPOCH_SECONDS")
+  private val endEpochSeconds: String? = System.getenv("META_TEST_END_EPOCH_SECONDS")
+  private val dataProvider: String =
+    System.getenv("META_TEST_DATA_PROVIDER") ?: "dataProviders/meta-test"
+
+  /** Optional. When set, the returned count must equal it exactly. */
+  private val expectedImpressions: String? = System.getenv("META_TEST_EXPECTED_IMPRESSIONS")
+
+  /** Optional. Writes the serialised request here so it can be replayed with curl. */
+  private val writeRequestTo: String? = System.getenv("META_TEST_WRITE_REQUEST_TO")
+
+  @Before
+  fun requireDeploymentAndTarget() {
+    assumeTrue(
+      "Skipping deployed-function test. Set META_TEST_FUNCTION_URL, META_TEST_ID_TOKEN, " +
+        "META_TEST_ENTITY_ID, META_TEST_START_EPOCH_SECONDS and META_TEST_END_EPOCH_SECONDS.",
+      !functionUrl.isNullOrEmpty() &&
+        !idToken.isNullOrEmpty() &&
+        !entityId.isNullOrEmpty() &&
+        !startEpochSeconds.isNullOrEmpty() &&
+        !endEpochSeconds.isNullOrEmpty(),
+    )
+  }
+
+  @Test
+  fun `deployed function answers an impression query over HTTPS`() {
+    val request: DataProviderImpressionQueryRequest = buildRequest()
+    writeRequestTo?.takeIf { it.isNotEmpty() }?.let { path ->
+      Files.write(Path.of(path), request.toByteArray())
+      println("Wrote serialised request to $path (${request.toByteArray().size} bytes)")
+    }
+
+    val response: HttpResponse<ByteArray> =
+      HttpClient.newBuilder()
+        .connectTimeout(CONNECT_TIMEOUT)
+        .build()
+        .send(
+          HttpRequest.newBuilder(URI.create(functionUrl!!))
+            // Mirrors ValidationCloudFunctionClient: an audience-scoped OIDC ID token, and a
+            // binary-proto content type. Google rejects an unauthenticated call before our code
+            // runs, so a 401/403 here means IAM, not application logic.
+            .header("Authorization", "Bearer $idToken")
+            .header("Content-Type", CONTENT_TYPE_PROTOBUF)
+            .timeout(REQUEST_TIMEOUT)
+            .POST(HttpRequest.BodyPublishers.ofByteArray(request.toByteArray()))
+            .build(),
+          HttpResponse.BodyHandlers.ofByteArray(),
+        )
+
+    println("HTTP ${response.statusCode()} from $functionUrl")
+    assertThat(response.statusCode()).isEqualTo(200)
+
+    val queryResponse = DataProviderImpressionQueryResponse.parseFrom(response.body())
+    assertThat(queryResponse.requestId).isEqualTo(request.requestId)
+
+    when {
+      queryResponse.hasResult() -> {
+        val count = queryResponse.result.value
+        println("RESULT: impressions=$count")
+        assertThat(count).isAtLeast(0L)
+        if (!expectedImpressions.isNullOrEmpty()) {
+          assertThat(count).isEqualTo(expectedImpressions.toLong())
+        }
+      }
+      queryResponse.hasSkipped() -> {
+        // A skip is a valid answer, not a failure. FILTER_NOT_SUPPORTED on a UTC-aligned window is
+        // the known interval limitation (#4), and reaching it still proves the whole transport,
+        // auth, and secret-injection path worked.
+        println(
+          "SKIPPED: ${queryResponse.skipped.reason} — ${queryResponse.skipped.detail}\n" +
+            "  (a skip still exercises transport, OIDC and secret injection; " +
+            "FILTER_NOT_SUPPORTED on a UTC window is edp-components#4, not a defect)"
+        )
+        assertWithMessage("expected a count but the function skipped: ${queryResponse.skipped.detail}")
+          .that(expectedImpressions.isNullOrEmpty())
+          .isTrue()
+      }
+      else -> throw AssertionError("Response set neither result nor skipped: $queryResponse")
+    }
+  }
+
+  private fun buildRequest(): DataProviderImpressionQueryRequest {
+    val level =
+      checkNotNull(MetaEntityLevels[entityType]) {
+        "META_TEST_ENTITY_TYPE '$entityType' is not a supported entity type"
+      }
+    check(level.level.isNotEmpty())
+    return dataProviderImpressionQueryRequest {
+      // Deterministic per (entity, interval) so replaying the same request is idempotent from
+      // Meta's perspective, matching how EdpValidationPostProcessor derives its request IDs.
+      requestId =
+        UUID.nameUUIDFromBytes(
+            "$dataProvider|$entityType|$entityId|$startEpochSeconds|$endEpochSeconds"
+              .toByteArray(Charsets.UTF_8)
+          )
+          .toString()
+      this.dataProvider = dataProvider
+      query = impressionQuery {
+        entityKeys += entityKey {
+          this.entityType = this@DeployedFunctionTest.entityType
+          this.entityId = this@DeployedFunctionTest.entityId!!
+        }
+        timeInterval = interval {
+          startTime = timestamp { seconds = startEpochSeconds!!.toLong() }
+          endTime = timestamp { seconds = endEpochSeconds!!.toLong() }
+        }
+      }
+    }
+  }
+
+  companion object {
+    private const val CONTENT_TYPE_PROTOBUF = "application/x-protobuf"
+    private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
+    // Generous: a cold start plus several sequential Graph round trips.
+    private val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(120)
+  }
+}

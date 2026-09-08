@@ -14,6 +14,26 @@ kt_jvm_test(
     ],
 )
 
+# Hits a deployed Cloud Function over HTTPS, so it is tagged `manual`: excluded from
+# `bazel test //...` and never run by CI. It also self-skips when its environment variables are
+# unset. See the meta README for how to run it against a deployment.
+kt_jvm_test(
+    name = "DeployedFunctionTest",
+    srcs = ["DeployedFunctionTest.kt"],
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.DeployedFunctionTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@wfa_common_jvm//imports/java/com/google/common/truth",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@wfa_common_jvm//imports/java/org/junit",
+    ],
+)
+
 kt_jvm_test(
     name = "MetaMarketingApiInsightsClientTest",
     srcs = ["MetaMarketingApiInsightsClientTest.kt"],
