@@ -220,26 +220,24 @@ class MetaMarketingApiInsightsClient(
           HttpResponse.BodyHandlers.ofString(),
         )
       } catch (e: Exception) {
-        // The cause may carry the request URI, which contains the access token. Never log `e`
-        // directly; it is attached as a cause for the caller to handle, not for this class to emit.
         throw MetaApiException("Marketing API request failed for $nodeForError", e)
       }
 
     logThrottleHeaders(response, nodeForError)
 
-    return when (val status = response.statusCode()) {
-      in 200..299 -> response.body()
-      else -> throw exceptionFor(status, response, nodeForError)
-    }
+    val status = response.statusCode()
+    // Meta answers this endpoint with 200 or an error; any other success status is unexpected and
+    // is surfaced rather than parsed as though it carried an Insights payload.
+    if (status == HTTP_OK) return response.body()
+    throw exceptionFor(status, response, nodeForError)
   }
 
   /**
-   * Maps a non-success response to the most specific exception it identifies.
+   * Maps a non-success response to the most specific exception it identifies, in precedence order.
    *
-   * Ordered by precedence, and driven by the error object's `code` rather than the HTTP status:
-   * Meta answers throttling, expired credentials, and malformed requests all with 400, so status
-   * alone cannot separate them. A recognised `code` therefore wins over status, leaving status as
-   * the fallback for responses that carry no usable error object.
+   * A recognised error `code` wins over the HTTP status; see [MetaRateLimitException] for why
+   * status is not a usable discriminator. Status is the fallback for responses carrying no error
+   * object.
    */
   private fun exceptionFor(
     status: Int,
@@ -278,10 +276,7 @@ class MetaMarketingApiInsightsClient(
       appUsage = response.headers().firstValue(APP_USAGE_HEADER).orElse(null),
     )
 
-  /**
-   * Logs Meta's quota headers. These are the only way to see throttling approaching — and to read
-   * `ads_api_access_tier`, which caps Insights volume — before requests start being rejected.
-   */
+  /** Quota consumption and `ads_api_access_tier` are observable only from these headers. */
   private fun logThrottleHeaders(response: HttpResponse<*>, nodeForError: String) {
     val headers = throttleHeadersOf(response)
     if (!headers.isEmpty()) {
@@ -366,17 +361,11 @@ class MetaMarketingApiInsightsClient(
     val type: String? = null,
     @SerializedName("fbtrace_id") val fbtraceId: String? = null,
   ) {
-    /**
-     * Meta signals Business Use Case throttling with HTTP 400 and one of these codes — not with
-     * HTTP 429, which the Marketing API never returns. Status alone therefore cannot distinguish a
-     * throttle from a malformed request, and `type` is not stable across errors (the same `code`
-     * arrives as `OAuthException` or `GraphMethodException` depending on the call), so `code` is
-     * the only field to branch on.
-     */
+    /** Whether this is a Business Use Case throttle. See [MetaRateLimitException]. */
     val isRateLimit: Boolean
       get() = code in RATE_LIMIT_CODES
 
-    /** Token expired, revoked, or otherwise invalid. Not transient; retrying cannot help. */
+    /** Whether Meta rejected the credentials. See [MetaAuthException]. */
     val isAuthFailure: Boolean
       get() = code == AUTH_ERROR_CODE
 
@@ -411,8 +400,8 @@ class MetaMarketingApiInsightsClient(
     // https://developers.facebook.com/docs/graph-api/changelog
     private const val DEFAULT_API_VERSION = "v25.0"
 
-    // Business Use Case throttling codes. Meta returns HTTP 400 for all of these, so they are
-    // indistinguishable from ordinary request errors by status alone.
+    private const val HTTP_OK = 200
+
     // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
     private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
     private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
@@ -420,7 +409,6 @@ class MetaMarketingApiInsightsClient(
     private val RATE_LIMIT_CODES =
       setOf(ADS_INSIGHTS_RATE_LIMIT_CODE, ADS_MANAGEMENT_RATE_LIMIT_CODE, PAGE_RATE_LIMIT_CODE)
 
-    /** Expired/invalid access token. */
     private const val AUTH_ERROR_CODE = 190L
 
     // Quota headers. `X-Business-Use-Case-Usage` also carries `ads_api_access_tier`, which
