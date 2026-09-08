@@ -385,6 +385,39 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
+  fun `prefers the error code over the HTTP status when classifying`() {
+    // Status is the weaker signal: Meta answers throttling, expired credentials and malformed
+    // requests all with 400, so a recognised `code` has to win over status. Pinned because it is
+    // the one case where classifying by status and classifying by code disagree — without this,
+    // the ordering in exceptionFor could be reversed and every other test would still pass.
+    insightsResponses =
+      listOf(
+        404 to
+          """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `throws MetaApiException when a failure carries no parseable error object`() {
+    // Infrastructure between us and Meta can fail with a non-JSON body — a proxy's HTML error
+    // page, or nothing at all. That reaches a different branch than a malformed 200 body, which
+    // is parsed as an Insights page rather than as an error.
+    insightsResponses = listOf(502 to "<html><body>Bad Gateway</body></html>")
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    assertThat(failure).hasMessageThat().contains("502")
+  }
+
+  @Test
   fun `classifies an expired token as MetaAuthException`() {
     insightsResponses =
       listOf(
