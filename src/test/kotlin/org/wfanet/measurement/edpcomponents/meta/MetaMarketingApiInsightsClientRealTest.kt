@@ -36,8 +36,8 @@ import org.junit.runners.JUnit4
  *
  * Everything risky in the client — URL construction, `appsecret_proof`, the account-timezone
  * lookup, JSON parsing, paging, and bucket summing — is covered against a fake server in
- * [MetaMarketingApiInsightsClientTest]. This class exists to confirm those same paths against
- * Meta itself, which no automated test can do.
+ * [MetaMarketingApiInsightsClientTest]. This class exists to confirm those same paths against Meta
+ * itself, which no automated test can do.
  *
  * **The interval must be whole days in the ad account's own timezone.** Meta answers only
  * account-midnight-aligned day ranges, so a UTC-midnight window on a non-UTC account throws
@@ -78,10 +78,7 @@ class MetaMarketingApiInsightsClientRealTest {
         "META_TEST_ENTITY_TYPE '$entityType' is not a supported entity type"
       }
     val target =
-      MetaInsightsTarget(
-        nodeId = "${entityLevel.nodeIdPrefix}$entityId",
-        level = entityLevel.level,
-      )
+      MetaInsightsTarget(nodeId = "${entityLevel.nodeIdPrefix}$entityId", level = entityLevel.level)
     val timeInterval = interval {
       startTime = timestamp { seconds = startEpochSeconds!!.toLong() }
       endTime = timestamp { seconds = endEpochSeconds!!.toLong() }
