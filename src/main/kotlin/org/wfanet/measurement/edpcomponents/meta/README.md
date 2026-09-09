@@ -3,7 +3,7 @@
 Meta's implementation of the `DataProviderImpressionQuery` contract for Halo EDP impression-count
 validation. It is a **dumb publisher-API adapter** (per the EDP Impression Count Validation design,
 §7): it answers "how many impressions did Meta record for these entities, over this interval,
-matching this filter?" — nothing more. All comparison/verdict logic lives in the Reporting Server's
+matching this filter?" — nothing more. All comparison/verdict logic lives in Results Fulfiller's
 `EdpValidationPostProcessor` (cross-media-measurement `#3962`).
 
 ## Contract
@@ -33,8 +33,8 @@ Bazel registry).
 
 ## Auth
 
-- Reporting Server → function: GCP OIDC ID token (handled upstream by `ValidationCloudFunctionClient`).
-- Meta System User token: **Secret Manager** only; never reaches the Reporting Server.
+- Results Fulfiller → function: GCP OIDC ID token (handled upstream by `ValidationCloudFunctionClient`).
+- Meta System User token: **Secret Manager** only; never reaches Results Fulfiller.
 
 ## Testing against live Meta
 
