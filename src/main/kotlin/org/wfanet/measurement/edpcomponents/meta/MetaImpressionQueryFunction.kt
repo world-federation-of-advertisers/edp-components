@@ -37,12 +37,12 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to a Meta
  * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
  * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
- * comparison, no verdict, and no callback — that all lives in the Reporting Server's
+ * comparison, no verdict, and no callback — that all lives in Results Fulfiller's
  * `EdpValidationPostProcessor`.
  *
- * The Reporting Server authenticates to this function with a GCP OIDC ID token (handled by the
+ * Results Fulfiller authenticates to this function with a GCP OIDC ID token (handled by the
  * platform / the `ValidationCloudFunctionClient`); Meta credentials live only in this function's
- * environment (Secret Manager) and never reach the Reporting Server.
+ * environment (Secret Manager) and never reach Results Fulfiller.
  */
 class MetaImpressionQueryFunction(
   private val insightsClient: MetaInsightsClient = defaultInsightsClient()
