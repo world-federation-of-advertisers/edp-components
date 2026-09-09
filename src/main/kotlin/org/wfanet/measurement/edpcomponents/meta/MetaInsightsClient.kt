@@ -98,8 +98,8 @@ open class MetaApiException(message: String, cause: Throwable? = null) : Excepti
  *
  * Distinct from [MetaApiException] because it is **transient and self-correcting**, where a
  * malformed request is neither. Meta signals throttling with HTTP 400 and an error `code` of 80000
- * (Ads Insights), 80004 (Ads Management), or 80001 (Page) — never HTTP 429, which the
- * Marketing API does not return. Status alone cannot distinguish a throttle from a bad request.
+ * (Ads Insights), 80004 (Ads Management), or 80001 (Page) — never HTTP 429, which the Marketing API
+ * does not return. Status alone cannot distinguish a throttle from a bad request.
  *
  * Handling is to wait out the window for the affected ad account rather than retrying:
  * `X-Business-Use-Case-Usage` carries `estimated_time_to_regain_access` for that purpose.

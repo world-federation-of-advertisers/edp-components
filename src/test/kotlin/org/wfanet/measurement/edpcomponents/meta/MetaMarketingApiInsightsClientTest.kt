@@ -347,6 +347,37 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
+  fun `classifies every recognised throttle code as MetaRateLimitException`() {
+    // Each code has to be exercised: they are what distinguishes a throttle from an ordinary 400,
+    // so one going unclassified would silently regress to a generic API error.
+    for (code in listOf(80000L, 80004L, 4L, 613L)) {
+      insightsIndex = 0
+      insightsResponses = listOf(400 to """{"error":{"message":"too many calls","code":$code}}""")
+
+      assertFailsWith<MetaRateLimitException>("code $code should classify as a throttle") {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+    }
+  }
+
+  @Test
+  fun `does not classify Pages throttle codes, which this client never triggers`() {
+    // 80001 and 32 are documented for the Pages API. This client calls ad objects and Insights, so
+    // treating them as throttles here would be classifying a response we cannot receive.
+    for (code in listOf(80001L, 32L)) {
+      insightsIndex = 0
+      insightsResponses = listOf(400 to """{"error":{"message":"page limit","code":$code}}""")
+
+      val failure =
+        assertFailsWith<MetaApiException> {
+          client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+        }
+
+      assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    }
+  }
+
+  @Test
   fun `classifies an Ads Insights throttle as MetaRateLimitException, not a generic API error`() {
     // Meta signals Business Use Case throttling with HTTP 400 and code 80000 — never HTTP 429,
     // which the Marketing API does not return. Status alone cannot distinguish this from a
@@ -392,8 +423,7 @@ class MetaMarketingApiInsightsClientTest {
     // the ordering in exceptionFor could be reversed and every other test would still pass.
     insightsResponses =
       listOf(
-        404 to
-          """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+        404 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
       )
 
     assertFailsWith<MetaRateLimitException> {
@@ -436,8 +466,7 @@ class MetaMarketingApiInsightsClientTest {
     // Same HTTP status as the throttle and the expired token above; only `code` differs.
     insightsResponses =
       listOf(
-        400 to
-          """{"error":{"message":"(#100) bad field","type":"OAuthException","code":100}}"""
+        400 to """{"error":{"message":"(#100) bad field","type":"OAuthException","code":100}}"""
       )
 
     val failure =

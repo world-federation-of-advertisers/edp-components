@@ -32,6 +32,7 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Logger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -61,7 +62,6 @@ import javax.crypto.spec.SecretKeySpec
  *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
  *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
- *
  * TODO(world-federation-of-advertisers/edp-components#3): Add a real Meta-sandbox integration test
  *   confirming the `time_range`/timezone behavior, the age/gender bucket strings, and `level=ad` on
  *   an ad node against live Meta.
@@ -91,6 +91,9 @@ class MetaMarketingApiInsightsClient(
   // Ad-account ID by node ID, so a repeated node isn't re-resolved on every request. A node's
   // parent account is stable, so caching for the client's life is safe.
   private val accountIdByNodeId = ConcurrentHashMap<String, String>()
+
+  // Successful responses carrying quota headers, counted per client instance to drive sampling.
+  private val quotaResponsesSeen = AtomicLong()
 
   override fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -245,6 +248,9 @@ class MetaMarketingApiInsightsClient(
     nodeForError: String,
   ): Exception {
     val error: MetaError? = parseErrorOrNull(response.body())
+    if (error?.isRateLimit == true) {
+      logger.warning("Meta throttled $nodeForError. Quota headers: ${throttleHeadersOf(response)}")
+    }
     return when {
       error?.isRateLimit == true ->
         MetaRateLimitException(
@@ -272,15 +278,23 @@ class MetaMarketingApiInsightsClient(
   private fun throttleHeadersOf(response: HttpResponse<*>) =
     ThrottleHeaders(
       businessUseCase = response.headers().firstValue(BUSINESS_USE_CASE_USAGE_HEADER).orElse(null),
-      insightsThrottle = response.headers().firstValue(INSIGHTS_THROTTLE_HEADER).orElse(null),
       appUsage = response.headers().firstValue(APP_USAGE_HEADER).orElse(null),
     )
 
-  /** Quota consumption and `ads_api_access_tier` are observable only from these headers. */
+  /**
+   * Quota consumption and `ads_api_access_tier` are observable only from these headers, so a sample
+   * is logged at INFO — FINE is suppressed by the default JUL configuration, which would write them
+   * nowhere. Throttles are logged in full by the caller of [exceptionFor].
+   */
   private fun logThrottleHeaders(response: HttpResponse<*>, nodeForError: String) {
     val headers = throttleHeadersOf(response)
-    if (!headers.isEmpty()) {
-      logger.fine { "Meta quota for $nodeForError: $headers" }
+    if (headers.isEmpty()) return
+    val seen = quotaResponsesSeen.incrementAndGet()
+    if (seen == 1L || seen % QUOTA_LOG_SAMPLE_INTERVAL == 0L) {
+      val suppressed = if (seen == 1L) 0 else QUOTA_LOG_SAMPLE_INTERVAL - 1
+      logger.info(
+        "Meta quota for $nodeForError: $headers (suppressed $suppressed since the previous entry)"
+      )
     }
   }
 
@@ -375,17 +389,11 @@ class MetaMarketingApiInsightsClient(
   }
 
   /** Response headers Meta uses to report quota consumption. Logged so throttling is visible. */
-  private data class ThrottleHeaders(
-    val businessUseCase: String?,
-    val insightsThrottle: String?,
-    val appUsage: String?,
-  ) {
-    fun isEmpty(): Boolean =
-      businessUseCase == null && insightsThrottle == null && appUsage == null
+  private data class ThrottleHeaders(val businessUseCase: String?, val appUsage: String?) {
+    fun isEmpty(): Boolean = businessUseCase == null && appUsage == null
 
     override fun toString(): String =
-      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase " +
-        "$INSIGHTS_THROTTLE_HEADER=$insightsThrottle $APP_USAGE_HEADER=$appUsage"
+      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase $APP_USAGE_HEADER=$appUsage"
   }
 
   companion object {
@@ -403,19 +411,33 @@ class MetaMarketingApiInsightsClient(
     private const val HTTP_OK = 200
 
     // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
+    //
+    // Marketing API calls fall under Business Use Case limits, which is what the Insights endpoint
+    // and the ad-object reads here are subject to. The two Platform codes are included because an
+    // app- or account-wide throttle can still surface on these endpoints. Page codes (80001, 32)
+    // are deliberately absent: they apply to the Pages API, which this client never calls.
     private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
     private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
-    private const val PAGE_RATE_LIMIT_CODE = 80001L
+    private const val APP_RATE_LIMIT_CODE = 4L
+    private const val CUSTOM_RATE_LIMIT_CODE = 613L
     private val RATE_LIMIT_CODES =
-      setOf(ADS_INSIGHTS_RATE_LIMIT_CODE, ADS_MANAGEMENT_RATE_LIMIT_CODE, PAGE_RATE_LIMIT_CODE)
+      setOf(
+        ADS_INSIGHTS_RATE_LIMIT_CODE,
+        ADS_MANAGEMENT_RATE_LIMIT_CODE,
+        APP_RATE_LIMIT_CODE,
+        CUSTOM_RATE_LIMIT_CODE,
+      )
 
     private const val AUTH_ERROR_CODE = 190L
 
     // Logged so quota consumption and `ads_api_access_tier` are visible before requests start
     // being rejected.
     private const val BUSINESS_USE_CASE_USAGE_HEADER = "x-business-use-case-usage"
-    private const val INSIGHTS_THROTTLE_HEADER = "x-fb-ads-insights-throttle"
     private const val APP_USAGE_HEADER = "x-app-usage"
+
+    // Successful responses are sampled rather than logged individually: at report-creation volume
+    // one line per Graph call would be unusable, but quota climbs silently without any.
+    private const val QUOTA_LOG_SAMPLE_INTERVAL = 1_000L
 
     private val logger: Logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
   }
