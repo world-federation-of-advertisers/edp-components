@@ -17,4 +17,5 @@ uber_jar_path = "/tmp/meta-cf-staging/MetaImpressionQueryFunction_deploy.jar"
 # invoke with your own identity via `gcloud auth print-identity-token`.
 invoker_service_accounts = []
 
-timeout_seconds = 60
+# Must stay below EdpValidationPostProcessor's 30-second deadline.
+timeout_seconds = 25

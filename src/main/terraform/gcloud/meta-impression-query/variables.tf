@@ -99,12 +99,12 @@ variable "invoker_service_accounts" {
 
 variable "timeout_seconds" {
   description = <<-EOT
-    Per-invocation timeout. Must exceed the caller's own timeout (EdpValidationPostProcessor
-    defaults to 30s) or the caller gives up while the function is still working. A single query
-    makes up to three sequential Graph round trips on a cold instance.
+    Per-invocation timeout. Must stay below the caller's own deadline: EdpValidationPostProcessor
+    stops waiting after 30 seconds, so a longer function timeout leaves this running and consuming
+    Meta quota after the caller has already given up on the response.
   EOT
   type        = number
-  default     = 60
+  default     = 25
 }
 
 variable "max_instances" {

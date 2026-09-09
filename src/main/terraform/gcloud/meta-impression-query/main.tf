@@ -58,13 +58,46 @@ resource "terraform_data" "deploy" {
     google_secret_manager_secret_iam_member.secret_accessor,
   ]
 
+  # Every value the provisioner reads. A creation-time provisioner does not re-run when one of
+  # its arguments changes, so anything omitted here can drift in Terraform while the deployed
+  # function keeps its previous configuration. depends_on orders resources; it does not do this.
   triggers_replace = [
+    var.project_id,
+    var.function_name,
+    var.region,
     var.uber_jar_path,
     var.extra_env_vars,
     var.timeout_seconds,
     var.max_instances,
+    local.entry_point,
     local.secret_mappings,
+    google_service_account.function.email,
   ]
+
+  # Values the destroy provisioner needs. A destroy-time provisioner cannot read var.* or other
+  # resources, only the resource's own state, so they are persisted here.
+  input = {
+    project_id    = var.project_id
+    function_name = var.function_name
+    region        = var.region
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      PROJECT_ID    = self.input.project_id
+      FUNCTION_NAME = self.input.function_name
+      CLOUD_REGION  = self.input.region
+    }
+    # Idempotent: a destroy after the function is already gone must not fail the whole operation.
+    command = <<-EOT
+      #!/bin/bash
+      set -uo pipefail
+      gcloud functions delete "$FUNCTION_NAME" \
+        --gen2 --project="$PROJECT_ID" --region="$CLOUD_REGION" --quiet || true
+    EOT
+  }
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
@@ -104,31 +137,43 @@ resource "terraform_data" "deploy" {
         "--set-secrets=$SECRET_MAPPINGS"
       )
 
+      # Each of these needs an explicit clear on the transition back to empty: supplying neither
+      # flag makes gcloud preserve the previous value, so Terraform would report a successful
+      # deployment while the function kept stale configuration.
       if [[ -n "$EXTRA_ENV_VARS" ]]; then
         args+=("--set-env-vars=$EXTRA_ENV_VARS")
+      else
+        args+=("--clear-env-vars")
       fi
       if [[ -n "$TIMEOUT_SECONDS" ]]; then
         args+=("--timeout=$TIMEOUT_SECONDS")
       fi
       if [[ -n "$MAX_INSTANCES" ]]; then
         args+=("--max-instances=$MAX_INSTANCES")
+      else
+        args+=("--clear-max-instances")
       fi
 
-      gcloud $${args[@]}
+      # Quoted: an unquoted expansion word-splits, so an environment-variable value containing
+      # whitespace would arrive as several arguments.
+      gcloud "$${args[@]}"
     EOT
   }
 }
 
-resource "google_cloudfunctions2_function_iam_member" "invoker" {
+# Bound on the Cloud Run service rather than the Cloud Functions resource: Gen-2 invocation
+# checks run.routes.invoke on the underlying service, so binding through the function resource can
+# leave the configured caller receiving 403.
+resource "google_cloud_run_service_iam_member" "invoker" {
   for_each = toset(var.invoker_service_accounts)
 
   depends_on = [terraform_data.deploy]
 
-  project        = var.project_id
-  location       = var.region
-  cloud_function = var.function_name
-  role           = "roles/run.invoker"
-  member         = "serviceAccount:${each.value}"
+  project  = var.project_id
+  location = var.region
+  service  = var.function_name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${each.value}"
 }
 
 locals {
