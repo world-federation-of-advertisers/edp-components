@@ -88,7 +88,7 @@ variable "invoker_service_accounts" {
   description = <<-EOT
     Service account emails permitted to invoke the function, granted roles/run.invoker.
 
-    In production this is the Reporting Server's service account, whose
+    In production this is the Results Fulfiller workload identity, whose
     ValidationCloudFunctionClient presents an audience-scoped OIDC ID token. The function is
     deployed with --no-allow-unauthenticated, so a caller absent from this list is rejected by
     Google before any of our code runs.
