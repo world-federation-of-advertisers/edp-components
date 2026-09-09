@@ -36,6 +36,7 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
+import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
@@ -97,6 +98,30 @@ class DeployedFunctionTest {
   }
 
   @Test
+  fun `deployed function rejects an unauthenticated request`() {
+    // Without this, a function accidentally deployed with --allow-unauthenticated would still pass
+    // the authenticated test below. Google enforces this before our code runs, so a 200 here means
+    // the deployment is open to any caller.
+    val response =
+      HttpClient.newBuilder()
+        .connectTimeout(CONNECT_TIMEOUT)
+        .build()
+        .send(
+          HttpRequest.newBuilder(URI.create(functionUrl!!))
+            .header("Content-Type", CONTENT_TYPE_PROTOBUF)
+            .timeout(REQUEST_TIMEOUT)
+            .POST(HttpRequest.BodyPublishers.ofByteArray(buildRequest().toByteArray()))
+            .build(),
+          HttpResponse.BodyHandlers.ofByteArray(),
+        )
+
+    logger.info("Unauthenticated request returned HTTP ${response.statusCode()}")
+    assertWithMessage("deployment accepts unauthenticated callers")
+      .that(response.statusCode())
+      .isIn(listOf(401, 403))
+  }
+
+  @Test
   fun `deployed function answers an impression query over HTTPS`() {
     val request: DataProviderImpressionQueryRequest = buildRequest()
     if (!writeRequestTo.isNullOrEmpty()) {
@@ -138,15 +163,17 @@ class DeployedFunctionTest {
         }
       }
       queryResponse.hasSkipped() -> {
-        // A skip is a valid answer, not a failure. FILTER_NOT_SUPPORTED on a UTC-aligned window is
-        // the known interval limitation (#4), and reaching it still proves the whole transport,
-        // auth, and secret-injection path worked.
-        logger.info(
-          "SKIPPED: ${queryResponse.skipped.reason} — ${queryResponse.skipped.detail}\n" +
-            "  (a skip still exercises transport, OIDC and secret injection; " +
-            "FILTER_NOT_SUPPORTED on a UTC window is edp-components#4, not a defect)"
-        )
-        assertWithMessage("expected a count but the function skipped: ${queryResponse.skipped.detail}")
+        val skipped = queryResponse.skipped
+        logger.info("SKIPPED: ${skipped.reason} — ${skipped.detail}")
+
+        // Only the interval limitation is an acceptable skip for this request shape, and reaching
+        // it still proves transport, OIDC and secret injection all worked. ENTITY_NOT_FOUND means
+        // the configured entity is wrong and API_ERROR means the deployment cannot reach Meta —
+        // either would otherwise let this test pass against an unusable function.
+        assertWithMessage("deployment is not usable: ${skipped.detail}")
+          .that(skipped.reason)
+          .isEqualTo(SkipReason.FILTER_NOT_SUPPORTED)
+        assertWithMessage("expected a count but the function skipped: ${skipped.detail}")
           .that(expectedImpressions.isNullOrEmpty())
           .isTrue()
       }
@@ -187,7 +214,8 @@ class DeployedFunctionTest {
 
     private const val CONTENT_TYPE_PROTOBUF = "application/x-protobuf"
     private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
-    // Generous: a cold start plus several sequential Graph round trips.
-    private val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(120)
+    // EdpValidationPostProcessor's own deadline. A longer timeout here would let this test pass
+    // for a deployment the real caller would already have abandoned.
+    private val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(30)
   }
 }
