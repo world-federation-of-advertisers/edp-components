@@ -14,6 +14,24 @@ kt_jvm_test(
     ],
 )
 
+# Manual: hits a deployed Cloud Function. See README.md.
+kt_jvm_test(
+    name = "DeployedFunctionTest",
+    srcs = ["DeployedFunctionTest.kt"],
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.DeployedFunctionTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@wfa_common_jvm//imports/java/com/google/common/truth",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@wfa_common_jvm//imports/java/org/junit",
+    ],
+)
+
 kt_jvm_test(
     name = "MetaMarketingApiInsightsClientTest",
     srcs = ["MetaMarketingApiInsightsClientTest.kt"],
