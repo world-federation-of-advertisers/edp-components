@@ -156,6 +156,33 @@ class MetaImpressionQueryFunctionTest {
   }
 
   @Test
+  fun `service returns 429 when Meta throttles`() {
+    // A skip would tell the caller we looked and found nothing; we could not look. A status makes
+    // EdpValidationPostProcessor record http_429 rather than treating a transient throttle as an
+    // ordinary skipped row.
+    val httpResponse = FakeHttpResponse()
+
+    MetaImpressionQueryFunction(
+        FakeMetaInsightsClient(throwable = MetaRateLimitException("throttled"))
+      )
+      .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
+
+    assertThat(httpResponse.statusCode).isEqualTo(429)
+  }
+
+  @Test
+  fun `service returns 502 when Meta rejects the credentials`() {
+    // Distinct from a throttle: waiting does not fix a revoked token, and as a skip it would
+    // disable validation indefinitely without failing anything.
+    val httpResponse = FakeHttpResponse()
+
+    MetaImpressionQueryFunction(FakeMetaInsightsClient(throwable = MetaAuthException("expired")))
+      .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
+
+    assertThat(httpResponse.statusCode).isEqualTo(502)
+  }
+
+  @Test
   fun `returns the impression count and routes campaign entities to campaign-level targets`() {
     val fake = FakeMetaInsightsClient(result = 12_345L)
 

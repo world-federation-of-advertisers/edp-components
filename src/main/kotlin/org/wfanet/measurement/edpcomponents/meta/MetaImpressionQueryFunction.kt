@@ -37,12 +37,12 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to a Meta
  * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
  * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
- * comparison, no verdict, and no callback — that all lives in the Reporting Server's
+ * comparison, no verdict, and no callback — that all lives in Results Fulfiller's
  * `EdpValidationPostProcessor`.
  *
- * The Reporting Server authenticates to this function with a GCP OIDC ID token (handled by the
+ * Results Fulfiller authenticates to this function with a GCP OIDC ID token (handled by the
  * platform / the `ValidationCloudFunctionClient`); Meta credentials live only in this function's
- * environment (Secret Manager) and never reach the Reporting Server.
+ * environment (Secret Manager) and never reach Results Fulfiller.
  */
 class MetaImpressionQueryFunction(
   private val insightsClient: MetaInsightsClient = defaultInsightsClient()
@@ -58,9 +58,20 @@ class MetaImpressionQueryFunction(
       val queryResponse = handle(queryRequest)
       response.setContentType(PROTOBUF_CONTENT_TYPE)
       response.outputStream.use { queryResponse.writeTo(it) }
+    } catch (e: MetaRateLimitException) {
+      // A skip would tell the caller we looked and found nothing. We could not look. Answering
+      // with a status instead means the caller records `http_429` rather than folding a transient
+      // throttle in with malformed requests.
+      logger.log(Level.WARNING, "Meta throttled the impression query", e)
+      response.setStatusCode(HTTP_TOO_MANY_REQUESTS)
+    } catch (e: MetaAuthException) {
+      // Distinct from a throttle: no amount of waiting fixes a revoked credential, and as a skip
+      // it would disable validation indefinitely without failing anything.
+      logger.log(Level.SEVERE, "Meta rejected the configured credentials", e)
+      response.setStatusCode(HTTP_BAD_GATEWAY)
     } catch (e: Exception) {
       logger.log(Level.SEVERE, "Impression query failed", e)
-      response.setStatusCode(500)
+      response.setStatusCode(HTTP_INTERNAL_SERVER_ERROR)
     }
   }
 
@@ -108,6 +119,11 @@ class MetaImpressionQueryFunction(
       )
     } catch (e: MetaEntityNotFoundException) {
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
+    } catch (e: MetaRateLimitException) {
+      // Rethrown rather than skipped so service() can answer with a status; see there.
+      throw e
+    } catch (e: MetaAuthException) {
+      throw e
     } catch (e: MetaApiException) {
       logger.log(Level.WARNING, "Marketing API error for request ${request.requestId}", e)
       skip(request.requestId, SkipReason.API_ERROR, e.message ?: "Marketing API error")
@@ -141,6 +157,10 @@ class MetaImpressionQueryFunction(
   companion object {
     private val logger = Logger.getLogger(MetaImpressionQueryFunction::class.java.name)
     private const val PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+
+    private const val HTTP_INTERNAL_SERVER_ERROR = 500
+    private const val HTTP_BAD_GATEWAY = 502
+    private const val HTTP_TOO_MANY_REQUESTS = 429
 
     /**
      * Builds the production client with the Meta System User token and app secret.

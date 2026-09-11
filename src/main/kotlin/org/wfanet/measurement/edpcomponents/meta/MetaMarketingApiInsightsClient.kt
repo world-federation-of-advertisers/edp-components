@@ -32,6 +32,8 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.logging.Logger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -60,7 +62,6 @@ import javax.crypto.spec.SecretKeySpec
  *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
  *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
- *
  * TODO(world-federation-of-advertisers/edp-components#3): Add a real Meta-sandbox integration test
  *   confirming the `time_range`/timezone behavior, the age/gender bucket strings, and `level=ad` on
  *   an ad node against live Meta.
@@ -90,6 +91,9 @@ class MetaMarketingApiInsightsClient(
   // Ad-account ID by node ID, so a repeated node isn't re-resolved on every request. A node's
   // parent account is stable, so caching for the client's life is safe.
   private val accountIdByNodeId = ConcurrentHashMap<String, String>()
+
+  // Successful responses carrying quota headers, counted per client instance to drive sampling.
+  private val quotaResponsesSeen = AtomicLong()
 
   override fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -126,7 +130,9 @@ class MetaMarketingApiInsightsClient(
     var total = 0L
     var nextUri: URI? = initialUri
     while (nextUri != null) {
-      val page: InsightsPage = parseInsightsPage(get(nextUri, target.nodeId), target.nodeId)
+      val graphResponse = get(nextUri, target.nodeId)
+      val page: InsightsPage =
+        parseInsightsPage(graphResponse.body, target.nodeId, graphResponse.quota)
       for (row in page.data.orEmpty()) {
         if (allowedAges.isNotEmpty() && row.age !in allowedAges) continue
         if (allowedGenders.isNotEmpty() && row.gender !in allowedGenders) continue
@@ -210,8 +216,11 @@ class MetaMarketingApiInsightsClient(
     return """{"since":"$since","until":"$until"}"""
   }
 
-  /** Sends a GET to [uri] and returns the body, mapping non-success statuses to exceptions. */
-  private fun get(uri: URI, nodeForError: String): String {
+  /** A successful Graph response: its body, and the quota headers that accompanied it. */
+  private data class GraphResponse(val body: String, val quota: ThrottleHeaders)
+
+  /** Sends a GET to [uri], mapping non-success statuses to exceptions. */
+  private fun get(uri: URI, nodeForError: String): GraphResponse {
     val response: HttpResponse<String> =
       try {
         httpClient.send(
@@ -221,43 +230,116 @@ class MetaMarketingApiInsightsClient(
       } catch (e: Exception) {
         throw MetaApiException("Marketing API request failed for $nodeForError", e)
       }
-    return when (val status = response.statusCode()) {
-      in 200..299 -> response.body()
-      404 -> throw MetaEntityNotFoundException("Meta node $nodeForError not found")
+
+    logThrottleHeaders(response, nodeForError)
+
+    val status = response.statusCode()
+    // Meta answers this endpoint with 200 or an error; any other success status is unexpected and
+    // is surfaced rather than parsed as though it carried an Insights payload.
+    if (status == HTTP_OK) return GraphResponse(response.body(), throttleHeadersOf(response))
+    throw exceptionFor(status, response, nodeForError)
+  }
+
+  /**
+   * Maps a non-success response to the most specific exception it identifies, in precedence order.
+   *
+   * A recognised error `code` wins over the HTTP status; see [MetaRateLimitException] for why
+   * status is not a usable discriminator. Status is the fallback for responses carrying no error
+   * object.
+   */
+  private fun exceptionFor(
+    status: Int,
+    response: HttpResponse<String>,
+    nodeForError: String,
+  ): Exception {
+    val error: MetaError? = parseErrorOrNull(response.body())
+    return when {
+      error?.isRateLimit == true ->
+        MetaRateLimitException(
+          "Marketing API throttled for $nodeForError. ${error.describe(nodeForError)}. " +
+            "Quota: ${throttleHeadersOf(response)}"
+        )
+      error?.isAuthFailure == true ->
+        MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
+      status == 404 -> MetaEntityNotFoundException("Meta node $nodeForError not found")
+      error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
       else ->
-        throw MetaApiException(
+        MetaApiException(
           "Marketing API returned $status for $nodeForError: ${response.body().take(500)}"
         )
     }
   }
 
-  private fun parseInsightsPage(body: String, nodeForError: String): InsightsPage {
+  private fun parseErrorOrNull(body: String): MetaError? =
+    try {
+      gson.fromJson(body, InsightsPage::class.java)?.error
+    } catch (e: JsonSyntaxException) {
+      null
+    }
+
+  private fun throttleHeadersOf(response: HttpResponse<*>) =
+    ThrottleHeaders(
+      businessUseCase = response.headers().firstValue(BUSINESS_USE_CASE_USAGE_HEADER).orElse(null),
+      appUsage = response.headers().firstValue(APP_USAGE_HEADER).orElse(null),
+    )
+
+  /**
+   * Quota consumption and `ads_api_access_tier` are observable only from these headers, so a sample
+   * is logged at INFO — FINE is suppressed by the default JUL configuration, which would write them
+   * nowhere. Throttles are logged in full by the caller of [exceptionFor].
+   */
+  private fun logThrottleHeaders(response: HttpResponse<*>, nodeForError: String) {
+    val headers = throttleHeadersOf(response)
+    if (headers.isEmpty()) return
+    val seen = quotaResponsesSeen.incrementAndGet()
+    if (seen == 1L || seen % QUOTA_LOG_SAMPLE_INTERVAL == 0L) {
+      val suppressed = if (seen == 1L) 0 else QUOTA_LOG_SAMPLE_INTERVAL - 1
+      logger.info(
+        "Meta quota for $nodeForError: $headers (suppressed $suppressed since the previous entry)"
+      )
+    }
+  }
+
+  private fun parseInsightsPage(
+    body: String,
+    nodeForError: String,
+    quota: ThrottleHeaders,
+  ): InsightsPage {
     val page =
       try {
         gson.fromJson(body, InsightsPage::class.java)
       } catch (e: JsonSyntaxException) {
         throw MetaApiException("Malformed Insights JSON for $nodeForError: ${body.take(200)}", e)
       } ?: throw MetaApiException("Empty Insights response for $nodeForError")
-    page.error.throwIfPresent(nodeForError)
+    page.error.throwIfPresent(nodeForError, quota)
     return page
   }
 
-  private fun parseNode(body: String, nodeForError: String): NodeResponse {
+  private fun parseNode(response: GraphResponse, nodeForError: String): NodeResponse {
     val node =
       try {
-        gson.fromJson(body, NodeResponse::class.java)
+        gson.fromJson(response.body, NodeResponse::class.java)
       } catch (e: JsonSyntaxException) {
-        throw MetaApiException("Malformed node JSON for $nodeForError: ${body.take(200)}", e)
+        throw MetaApiException(
+          "Malformed node JSON for $nodeForError: ${response.body.take(200)}",
+          e,
+        )
       } ?: throw MetaApiException("Empty node response for $nodeForError")
-    node.error.throwIfPresent(nodeForError)
+    node.error.throwIfPresent(nodeForError, response.quota)
     return node
   }
 
   // Meta sometimes embeds an error object in an HTTP 200 body; treating that as zero impressions
-  // would be a silent wrong answer, so any present error is raised.
-  private fun MetaError?.throwIfPresent(nodeForError: String) {
-    if (this != null) {
-      throw MetaApiException("Meta returned error for $nodeForError: $message (code $code)")
+  // would be a silent wrong answer, so any present error is raised — classified by `code`, as on
+  // the non-2xx path, so a throttle is never mistaken for an ordinary failure.
+  private fun MetaError?.throwIfPresent(nodeForError: String, quota: ThrottleHeaders) {
+    if (this == null) return
+    throw when {
+      isRateLimit ->
+        MetaRateLimitException("Marketing API throttled. ${describe(nodeForError)}. Quota: $quota")
+      isAuthFailure ->
+        MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
+      else -> MetaApiException(describe(nodeForError))
     }
   }
 
@@ -299,8 +381,30 @@ class MetaMarketingApiInsightsClient(
   private data class MetaError(
     val message: String? = null,
     val code: Long? = null,
+    @SerializedName("error_subcode") val subcode: Long? = null,
     val type: String? = null,
-  )
+    @SerializedName("fbtrace_id") val fbtraceId: String? = null,
+  ) {
+    /** Whether this is a Business Use Case throttle. See [MetaRateLimitException]. */
+    val isRateLimit: Boolean
+      get() = code in RATE_LIMIT_CODES
+
+    /** Whether Meta rejected the credentials. See [MetaAuthException]. */
+    val isAuthFailure: Boolean
+      get() = code == AUTH_ERROR_CODE
+
+    fun describe(nodeForError: String): String =
+      "Meta returned error for $nodeForError: $message " +
+        "(code=$code subcode=$subcode type=$type fbtrace_id=$fbtraceId)"
+  }
+
+  /** Response headers Meta uses to report quota consumption. Logged so throttling is visible. */
+  private data class ThrottleHeaders(val businessUseCase: String?, val appUsage: String?) {
+    fun isEmpty(): Boolean = businessUseCase == null && appUsage == null
+
+    override fun toString(): String =
+      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase $APP_USAGE_HEADER=$appUsage"
+  }
 
   companion object {
     private const val GRAPH_API_BASE = "https://graph.facebook.com"
@@ -313,5 +417,42 @@ class MetaMarketingApiInsightsClient(
     // v25.0 (released 2026-02-18) is the current Graph API version per Meta's changelog:
     // https://developers.facebook.com/docs/graph-api/changelog
     private const val DEFAULT_API_VERSION = "v25.0"
+
+    private const val HTTP_OK = 200
+
+    // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
+    //
+    // Marketing API calls fall under Business Use Case limits, which is what the Insights endpoint
+    // and the ad-object reads here are subject to. The two Platform codes are included because an
+    // app- or account-wide throttle can still surface on these endpoints. Page codes (80001, 32)
+    // are deliberately absent: they apply to the Pages API, which this client never calls.
+    private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
+    private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
+    private const val APP_RATE_LIMIT_CODE = 4L
+    private const val USER_RATE_LIMIT_CODE = 17L
+    private const val APPLICATION_LIMIT_CODE = 341L
+    private const val CUSTOM_RATE_LIMIT_CODE = 613L
+    private val RATE_LIMIT_CODES =
+      setOf(
+        ADS_INSIGHTS_RATE_LIMIT_CODE,
+        ADS_MANAGEMENT_RATE_LIMIT_CODE,
+        APP_RATE_LIMIT_CODE,
+        USER_RATE_LIMIT_CODE,
+        APPLICATION_LIMIT_CODE,
+        CUSTOM_RATE_LIMIT_CODE,
+      )
+
+    private const val AUTH_ERROR_CODE = 190L
+
+    // Logged so quota consumption and `ads_api_access_tier` are visible before requests start
+    // being rejected.
+    private const val BUSINESS_USE_CASE_USAGE_HEADER = "x-business-use-case-usage"
+    private const val APP_USAGE_HEADER = "x-app-usage"
+
+    // Successful responses are sampled rather than logged individually: at report-creation volume
+    // one line per Graph call would be unusable, but quota climbs silently without any.
+    private const val QUOTA_LOG_SAMPLE_INTERVAL = 1_000L
+
+    private val logger: Logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
   }
 }
