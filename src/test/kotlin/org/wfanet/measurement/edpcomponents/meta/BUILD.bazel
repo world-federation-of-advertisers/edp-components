@@ -27,3 +27,20 @@ kt_jvm_test(
         "@wfa_common_jvm//imports/kotlin/kotlin/test",
     ],
 )
+
+# Manual: hits the live Meta Marketing API. See README.md.
+kt_jvm_test(
+    name = "MetaMarketingApiInsightsClientRealTest",
+    srcs = ["MetaMarketingApiInsightsClientRealTest.kt"],
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.MetaMarketingApiInsightsClientRealTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@wfa_common_jvm//imports/java/com/google/common/truth",
+        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@wfa_common_jvm//imports/java/org/junit",
+    ],
+)
