@@ -173,7 +173,7 @@ class MetaMarketingApiInsightsClient(
   private fun fetchAccountId(nodeId: String): String {
     val uri =
       URI.create("$graphApiBase/$apiVersion/${nodeId.urlEncoded()}?fields=account_id&$authQuery")
-    val node = parseNode(get(uri, nodeId).body, nodeId)
+    val node = parseNode(get(uri, nodeId), nodeId)
     return node.accountId ?: throw MetaApiException("Meta node $nodeId returned no account_id")
   }
 
@@ -182,7 +182,7 @@ class MetaMarketingApiInsightsClient(
     val uri =
       URI.create("$graphApiBase/$apiVersion/${node.urlEncoded()}?fields=timezone_name&$authQuery")
     val name =
-      parseNode(get(uri, node).body, node).timezoneName
+      parseNode(get(uri, node), node).timezoneName
         ?: throw MetaApiException("Meta account $node returned no timezone_name")
     return try {
       ZoneId.of(name)
@@ -303,7 +303,7 @@ class MetaMarketingApiInsightsClient(
   private fun parseInsightsPage(
     body: String,
     nodeForError: String,
-    quota: ThrottleHeaders? = null,
+    quota: ThrottleHeaders,
   ): InsightsPage {
     val page =
       try {
@@ -315,28 +315,28 @@ class MetaMarketingApiInsightsClient(
     return page
   }
 
-  private fun parseNode(body: String, nodeForError: String): NodeResponse {
+  private fun parseNode(response: GraphResponse, nodeForError: String): NodeResponse {
     val node =
       try {
-        gson.fromJson(body, NodeResponse::class.java)
+        gson.fromJson(response.body, NodeResponse::class.java)
       } catch (e: JsonSyntaxException) {
-        throw MetaApiException("Malformed node JSON for $nodeForError: ${body.take(200)}", e)
+        throw MetaApiException(
+          "Malformed node JSON for $nodeForError: ${response.body.take(200)}",
+          e,
+        )
       } ?: throw MetaApiException("Empty node response for $nodeForError")
-    node.error.throwIfPresent(nodeForError)
+    node.error.throwIfPresent(nodeForError, response.quota)
     return node
   }
 
   // Meta sometimes embeds an error object in an HTTP 200 body; treating that as zero impressions
   // would be a silent wrong answer, so any present error is raised — classified by `code`, as on
   // the non-2xx path, so a throttle is never mistaken for an ordinary failure.
-  private fun MetaError?.throwIfPresent(nodeForError: String, quota: ThrottleHeaders? = null) {
+  private fun MetaError?.throwIfPresent(nodeForError: String, quota: ThrottleHeaders) {
     if (this == null) return
     throw when {
       isRateLimit ->
-        MetaRateLimitException(
-          "Marketing API throttled. ${describe(nodeForError)}." +
-            if (quota == null) "" else " Quota: $quota"
-        )
+        MetaRateLimitException("Marketing API throttled. ${describe(nodeForError)}. Quota: $quota")
       isAuthFailure ->
         MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
       else -> MetaApiException(describe(nodeForError))

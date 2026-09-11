@@ -46,6 +46,9 @@ class MetaMarketingApiInsightsClientTest {
   private var accountIdBody = """{"account_id":"999","id":"111"}"""
   private var timezoneBody = """{"timezone_name":"Asia/Tokyo","id":"act_999"}"""
 
+  /** Value served as `x-business-use-case-usage`, or null to omit the header. */
+  private var quotaHeader: String? = null
+
   @Before
   fun startServer() {
     server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -72,6 +75,7 @@ class MetaMarketingApiInsightsClientTest {
         else -> 500 to """{"error":{"message":"unexpected request","code":1}}"""
       }
     val bytes = body.toByteArray(StandardCharsets.UTF_8)
+    quotaHeader?.let { exchange.responseHeaders.add("x-business-use-case-usage", it) }
     exchange.sendResponseHeaders(status, bytes.size.toLong())
     exchange.responseBody.use { it.write(bytes) }
   }
@@ -476,6 +480,34 @@ class MetaMarketingApiInsightsClientTest {
 
     assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
     assertThat(failure).isNotInstanceOf(MetaAuthException::class.java)
+  }
+
+  @Test
+  fun `carries quota headers on a non-2xx throttle`() {
+    quotaHeader = """{"1":[{"type":"ads_insights","call_count":100}]}"""
+    insightsResponses = listOf(400 to """{"error":{"message":"too many","code":80000}}""")
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("ads_insights")
+  }
+
+  @Test
+  fun `carries quota headers on a throttle embedded in a 200 during a node lookup`() {
+    // The account and timezone lookups parse through parseNode, a separate path from the Insights
+    // page. A throttle arriving there previously reached the boundary with no quota context.
+    quotaHeader = """{"1":[{"type":"ads_management","call_count":100}]}"""
+    accountIdBody = """{"error":{"message":"too many","code":80004}}"""
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("ads_management")
   }
 
   @Test
