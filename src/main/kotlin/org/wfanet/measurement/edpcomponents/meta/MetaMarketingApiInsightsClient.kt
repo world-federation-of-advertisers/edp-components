@@ -130,7 +130,9 @@ class MetaMarketingApiInsightsClient(
     var total = 0L
     var nextUri: URI? = initialUri
     while (nextUri != null) {
-      val page: InsightsPage = parseInsightsPage(get(nextUri, target.nodeId), target.nodeId)
+      val graphResponse = get(nextUri, target.nodeId)
+      val page: InsightsPage =
+        parseInsightsPage(graphResponse.body, target.nodeId, graphResponse.quota)
       for (row in page.data.orEmpty()) {
         if (allowedAges.isNotEmpty() && row.age !in allowedAges) continue
         if (allowedGenders.isNotEmpty() && row.gender !in allowedGenders) continue
@@ -171,7 +173,7 @@ class MetaMarketingApiInsightsClient(
   private fun fetchAccountId(nodeId: String): String {
     val uri =
       URI.create("$graphApiBase/$apiVersion/${nodeId.urlEncoded()}?fields=account_id&$authQuery")
-    val node = parseNode(get(uri, nodeId), nodeId)
+    val node = parseNode(get(uri, nodeId).body, nodeId)
     return node.accountId ?: throw MetaApiException("Meta node $nodeId returned no account_id")
   }
 
@@ -180,7 +182,7 @@ class MetaMarketingApiInsightsClient(
     val uri =
       URI.create("$graphApiBase/$apiVersion/${node.urlEncoded()}?fields=timezone_name&$authQuery")
     val name =
-      parseNode(get(uri, node), node).timezoneName
+      parseNode(get(uri, node).body, node).timezoneName
         ?: throw MetaApiException("Meta account $node returned no timezone_name")
     return try {
       ZoneId.of(name)
@@ -214,8 +216,11 @@ class MetaMarketingApiInsightsClient(
     return """{"since":"$since","until":"$until"}"""
   }
 
-  /** Sends a GET to [uri] and returns the body, mapping non-success statuses to exceptions. */
-  private fun get(uri: URI, nodeForError: String): String {
+  /** A successful Graph response: its body, and the quota headers that accompanied it. */
+  private data class GraphResponse(val body: String, val quota: ThrottleHeaders)
+
+  /** Sends a GET to [uri], mapping non-success statuses to exceptions. */
+  private fun get(uri: URI, nodeForError: String): GraphResponse {
     val response: HttpResponse<String> =
       try {
         httpClient.send(
@@ -231,7 +236,7 @@ class MetaMarketingApiInsightsClient(
     val status = response.statusCode()
     // Meta answers this endpoint with 200 or an error; any other success status is unexpected and
     // is surfaced rather than parsed as though it carried an Insights payload.
-    if (status == HTTP_OK) return response.body()
+    if (status == HTTP_OK) return GraphResponse(response.body(), throttleHeadersOf(response))
     throw exceptionFor(status, response, nodeForError)
   }
 
@@ -248,14 +253,11 @@ class MetaMarketingApiInsightsClient(
     nodeForError: String,
   ): Exception {
     val error: MetaError? = parseErrorOrNull(response.body())
-    if (error?.isRateLimit == true) {
-      logger.warning("Meta throttled $nodeForError. Quota headers: ${throttleHeadersOf(response)}")
-    }
     return when {
       error?.isRateLimit == true ->
         MetaRateLimitException(
           "Marketing API throttled for $nodeForError. ${error.describe(nodeForError)}. " +
-            "Quota headers: ${throttleHeadersOf(response)}"
+            "Quota: ${throttleHeadersOf(response)}"
         )
       error?.isAuthFailure == true ->
         MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
@@ -298,14 +300,18 @@ class MetaMarketingApiInsightsClient(
     }
   }
 
-  private fun parseInsightsPage(body: String, nodeForError: String): InsightsPage {
+  private fun parseInsightsPage(
+    body: String,
+    nodeForError: String,
+    quota: ThrottleHeaders? = null,
+  ): InsightsPage {
     val page =
       try {
         gson.fromJson(body, InsightsPage::class.java)
       } catch (e: JsonSyntaxException) {
         throw MetaApiException("Malformed Insights JSON for $nodeForError: ${body.take(200)}", e)
       } ?: throw MetaApiException("Empty Insights response for $nodeForError")
-    page.error.throwIfPresent(nodeForError)
+    page.error.throwIfPresent(nodeForError, quota)
     return page
   }
 
@@ -323,10 +329,14 @@ class MetaMarketingApiInsightsClient(
   // Meta sometimes embeds an error object in an HTTP 200 body; treating that as zero impressions
   // would be a silent wrong answer, so any present error is raised — classified by `code`, as on
   // the non-2xx path, so a throttle is never mistaken for an ordinary failure.
-  private fun MetaError?.throwIfPresent(nodeForError: String) {
+  private fun MetaError?.throwIfPresent(nodeForError: String, quota: ThrottleHeaders? = null) {
     if (this == null) return
     throw when {
-      isRateLimit -> MetaRateLimitException("Marketing API throttled. ${describe(nodeForError)}")
+      isRateLimit ->
+        MetaRateLimitException(
+          "Marketing API throttled. ${describe(nodeForError)}." +
+            if (quota == null) "" else " Quota: $quota"
+        )
       isAuthFailure ->
         MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
       else -> MetaApiException(describe(nodeForError))
@@ -419,12 +429,16 @@ class MetaMarketingApiInsightsClient(
     private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
     private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
     private const val APP_RATE_LIMIT_CODE = 4L
+    private const val USER_RATE_LIMIT_CODE = 17L
+    private const val APPLICATION_LIMIT_CODE = 341L
     private const val CUSTOM_RATE_LIMIT_CODE = 613L
     private val RATE_LIMIT_CODES =
       setOf(
         ADS_INSIGHTS_RATE_LIMIT_CODE,
         ADS_MANAGEMENT_RATE_LIMIT_CODE,
         APP_RATE_LIMIT_CODE,
+        USER_RATE_LIMIT_CODE,
+        APPLICATION_LIMIT_CODE,
         CUSTOM_RATE_LIMIT_CODE,
       )
 

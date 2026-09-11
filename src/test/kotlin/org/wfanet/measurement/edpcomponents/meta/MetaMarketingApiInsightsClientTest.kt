@@ -350,7 +350,7 @@ class MetaMarketingApiInsightsClientTest {
   fun `classifies every recognised throttle code as MetaRateLimitException`() {
     // Each code has to be exercised: they are what distinguishes a throttle from an ordinary 400,
     // so one going unclassified would silently regress to a generic API error.
-    for (code in listOf(80000L, 80004L, 4L, 613L)) {
+    for (code in listOf(80000L, 80004L, 4L, 17L, 341L, 613L)) {
       insightsIndex = 0
       insightsResponses = listOf(400 to """{"error":{"message":"too many calls","code":$code}}""")
 
