@@ -190,7 +190,11 @@ resource "terraform_data" "function_lifecycle" {
 resource "google_cloud_run_service_iam_member" "invoker" {
   for_each = toset(var.invoker_service_accounts)
 
-  depends_on = [terraform_data.deploy]
+  # Depends on the lifecycle resource rather than the deploy so that teardown is ordered. As
+  # siblings both dependent on deploy, Terraform could remove this binding concurrently with the
+  # function-delete provisioner, and IAM cleanup would fail against an already-missing service.
+  # Creation stays deploy -> lifecycle -> IAM; destroy becomes IAM -> deletion -> deploy.
+  depends_on = [terraform_data.function_lifecycle]
 
   project  = var.project_id
   location = var.region
