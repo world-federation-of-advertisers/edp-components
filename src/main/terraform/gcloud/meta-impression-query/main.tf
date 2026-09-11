@@ -74,31 +74,6 @@ resource "terraform_data" "deploy" {
     google_service_account.function.email,
   ]
 
-  # Values the destroy provisioner needs. A destroy-time provisioner cannot read var.* or other
-  # resources, only the resource's own state, so they are persisted here.
-  input = {
-    project_id    = var.project_id
-    function_name = var.function_name
-    region        = var.region
-  }
-
-  provisioner "local-exec" {
-    when        = destroy
-    interpreter = ["/bin/bash", "-c"]
-    environment = {
-      PROJECT_ID    = self.input.project_id
-      FUNCTION_NAME = self.input.function_name
-      CLOUD_REGION  = self.input.region
-    }
-    # Idempotent: a destroy after the function is already gone must not fail the whole operation.
-    command = <<-EOT
-      #!/bin/bash
-      set -uo pipefail
-      gcloud functions delete "$FUNCTION_NAME" \
-        --gen2 --project="$PROJECT_ID" --region="$CLOUD_REGION" --quiet || true
-    EOT
-  }
-
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     environment = {
@@ -157,6 +132,54 @@ resource "terraform_data" "deploy" {
       # Quoted: an unquoted expansion word-splits, so an environment-variable value containing
       # whitespace would arrive as several arguments.
       gcloud "$${args[@]}"
+    EOT
+  }
+}
+
+# Deletion is a separate resource from the deploy so that it is not caught up in replacement.
+# terraform_data.deploy replaces whenever any deployment input changes; a destroy provisioner on it
+# would therefore delete the live function before every redeploy, leaving it absent entirely if the
+# subsequent deploy failed. This resource is keyed only on identity, so it is created once and
+# destroyed once.
+resource "terraform_data" "function_lifecycle" {
+  depends_on = [terraform_data.deploy]
+
+  # A destroy provisioner cannot read var.* or other resources, only its own state.
+  input = {
+    project_id    = var.project_id
+    function_name = var.function_name
+    region        = var.region
+  }
+
+  triggers_replace = [var.project_id, var.function_name, var.region]
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      PROJECT_ID    = self.input.project_id
+      FUNCTION_NAME = self.input.function_name
+      CLOUD_REGION  = self.input.region
+    }
+    # Only an already-absent function is tolerated. Permission and network failures must fail the
+    # destroy rather than reporting success while the function is still deployed.
+    command = <<-EOT
+      #!/bin/bash
+      set -uo pipefail
+
+      stderr="$(gcloud functions delete "$FUNCTION_NAME" \
+        --gen2 --project="$PROJECT_ID" --region="$CLOUD_REGION" --quiet 2>&1 >/dev/null)"
+      status=$?
+
+      if [[ $status -eq 0 ]]; then
+        exit 0
+      fi
+      if grep -qiE 'NOT_FOUND|does not exist|could not be found' <<<"$stderr"; then
+        echo "Function already absent; nothing to delete."
+        exit 0
+      fi
+      echo "$stderr" >&2
+      exit "$status"
     EOT
   }
 }
