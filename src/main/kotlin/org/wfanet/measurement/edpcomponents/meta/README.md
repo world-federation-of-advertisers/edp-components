@@ -87,6 +87,13 @@ PY
 | `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — local midnight |
 | `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
 
+It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
+environment holding `META_ACCESS_TOKEN` and `META_APP_SECRET` as secrets and the target fields as a
+`META_TEST_CONFIG_CONTENT` JSON variable. That workflow is dispatch-only; it never runs on push or
+pull request.
+
+Locally:
+
 ```bash
 bazel test \
   //src/test/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaMarketingApiInsightsClientRealTest \

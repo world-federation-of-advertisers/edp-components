@@ -1,0 +1,83 @@
+# Copyright 2026 The Cross-Media Measurement Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs the live-Meta test against the real Marketing API. Manual dispatch only: it consumes Meta
+# API quota and needs credentials, so it must never run on push or pull_request.
+name: Live Meta test
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub-managed environment supplying the Meta credentials and target"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  live-meta-test:
+    name: Live Meta test
+    runs-on: ubuntu-24.04
+    # Gates the credentials behind whatever protection rules the environment carries.
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Check out revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Bazel
+        uses: world-federation-of-advertisers/actions/setup-bazel@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
+
+      # Target fields are not credentials, so they travel together as one variable rather than as
+      # five. The token and app secret come from environment secrets: Actions variables are not
+      # masked in logs.
+      - name: Read target configuration
+        env:
+          META_TEST_CONFIG_CONTENT: ${{ vars.META_TEST_CONFIG_CONTENT }}
+        run: |
+          if [[ -z "$META_TEST_CONFIG_CONTENT" ]]; then
+            echo "vars.META_TEST_CONFIG_CONTENT is empty for environment ${{ inputs.environment }}" >&2
+            exit 1
+          fi
+          for field in entity_id entity_type start_epoch_seconds end_epoch_seconds; do
+            if ! jq -e --arg f "$field" 'has($f)' <<<"$META_TEST_CONFIG_CONTENT" >/dev/null; then
+              echo "META_TEST_CONFIG_CONTENT is missing required field: $field" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "META_TEST_ENTITY_ID=$(jq -r '.entity_id' <<<"$META_TEST_CONFIG_CONTENT")"
+            echo "META_TEST_ENTITY_TYPE=$(jq -r '.entity_type' <<<"$META_TEST_CONFIG_CONTENT")"
+            echo "META_TEST_START_EPOCH_SECONDS=$(jq -r '.start_epoch_seconds' <<<"$META_TEST_CONFIG_CONTENT")"
+            echo "META_TEST_END_EPOCH_SECONDS=$(jq -r '.end_epoch_seconds' <<<"$META_TEST_CONFIG_CONTENT")"
+            echo "META_TEST_EXPECTED_IMPRESSIONS=$(jq -r '.expected_impressions // empty' <<<"$META_TEST_CONFIG_CONTENT")"
+          } >> "$GITHUB_ENV"
+
+      - name: Run
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: >
+          bazel test
+          //src/test/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaMarketingApiInsightsClientRealTest
+          --test_env=META_ACCESS_TOKEN
+          --test_env=META_APP_SECRET
+          --test_env=META_TEST_ENTITY_ID
+          --test_env=META_TEST_ENTITY_TYPE
+          --test_env=META_TEST_START_EPOCH_SECONDS
+          --test_env=META_TEST_END_EPOCH_SECONDS
+          --test_env=META_TEST_EXPECTED_IMPRESSIONS
+          --test_output=all
+          --nocache_test_results
