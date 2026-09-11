@@ -21,7 +21,7 @@ on:
     inputs:
       environment:
         description: "GitHub-managed environment supplying the Meta credentials and target"
-        type: string
+        type: environment
         required: true
 
 permissions:
@@ -43,26 +43,57 @@ jobs:
       # Target fields are not credentials, so they travel together as one variable rather than as
       # five. The token and app secret come from environment secrets: Actions variables are not
       # masked in logs.
-      - name: Read target configuration
+      # Everything the run needs is validated here, because the test itself skips rather than
+      # fails when a variable is missing — so an unvalidated run reports success without ever
+      # contacting Meta.
+      - name: Validate credentials and target configuration
         env:
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
           META_TEST_CONFIG_CONTENT: ${{ vars.META_TEST_CONFIG_CONTENT }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
         run: |
-          if [[ -z "$META_TEST_CONFIG_CONTENT" ]]; then
-            echo "vars.META_TEST_CONFIG_CONTENT is empty for environment ${{ inputs.environment }}" >&2
-            exit 1
-          fi
-          for field in entity_id entity_type start_epoch_seconds end_epoch_seconds; do
-            if ! jq -e --arg f "$field" 'has($f)' <<<"$META_TEST_CONFIG_CONTENT" >/dev/null; then
-              echo "META_TEST_CONFIG_CONTENT is missing required field: $field" >&2
-              exit 1
-            fi
+          set -euo pipefail
+
+          fail() { echo "$1 (environment: $ENVIRONMENT_NAME)" >&2; exit 1; }
+
+          [[ -n "$META_ACCESS_TOKEN" ]] || fail "secrets.META_ACCESS_TOKEN is not set"
+          [[ -n "$META_APP_SECRET" ]] || fail "secrets.META_APP_SECRET is not set"
+          [[ -n "$META_TEST_CONFIG_CONTENT" ]] || fail "vars.META_TEST_CONFIG_CONTENT is empty"
+
+          jq -e . >/dev/null <<<"$META_TEST_CONFIG_CONTENT" ||
+            fail "META_TEST_CONFIG_CONTENT is not valid JSON"
+
+          read_field() {
+            local value
+            value="$(jq -r --arg f "$1" '.[$f] // empty' <<<"$META_TEST_CONFIG_CONTENT")"
+            [[ -n "$value" ]] || fail "META_TEST_CONFIG_CONTENT.$1 is missing or empty"
+            printf '%s' "$value"
+          }
+
+          entity_id="$(read_field entity_id)"
+          entity_type="$(read_field entity_type)"
+          start="$(read_field start_epoch_seconds)"
+          end="$(read_field end_epoch_seconds)"
+          expected="$(read_field expected_impressions)"
+
+          case "$entity_type" in
+            campaign|ad|creative|ad_set|adset|account|ad_account) ;;
+            *) fail "unsupported entity_type: $entity_type" ;;
+          esac
+
+          for pair in "start_epoch_seconds:$start" "end_epoch_seconds:$end" \
+                      "expected_impressions:$expected"; do
+            [[ "${pair#*:}" =~ ^[0-9]+$ ]] || fail "${pair%%:*} must be a nonnegative integer"
           done
+          (( start < end )) || fail "start_epoch_seconds must be before end_epoch_seconds"
+
           {
-            echo "META_TEST_ENTITY_ID=$(jq -r '.entity_id' <<<"$META_TEST_CONFIG_CONTENT")"
-            echo "META_TEST_ENTITY_TYPE=$(jq -r '.entity_type' <<<"$META_TEST_CONFIG_CONTENT")"
-            echo "META_TEST_START_EPOCH_SECONDS=$(jq -r '.start_epoch_seconds' <<<"$META_TEST_CONFIG_CONTENT")"
-            echo "META_TEST_END_EPOCH_SECONDS=$(jq -r '.end_epoch_seconds' <<<"$META_TEST_CONFIG_CONTENT")"
-            echo "META_TEST_EXPECTED_IMPRESSIONS=$(jq -r '.expected_impressions // empty' <<<"$META_TEST_CONFIG_CONTENT")"
+            echo "META_TEST_ENTITY_ID=$entity_id"
+            echo "META_TEST_ENTITY_TYPE=$entity_type"
+            echo "META_TEST_START_EPOCH_SECONDS=$start"
+            echo "META_TEST_END_EPOCH_SECONDS=$end"
+            echo "META_TEST_EXPECTED_IMPRESSIONS=$expected"
           } >> "$GITHUB_ENV"
 
       - name: Run

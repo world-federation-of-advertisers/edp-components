@@ -88,9 +88,28 @@ PY
 | `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
 
 It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
-environment holding `META_ACCESS_TOKEN` and `META_APP_SECRET` as secrets and the target fields as a
-`META_TEST_CONFIG_CONTENT` JSON variable. That workflow is dispatch-only; it never runs on push or
-pull request.
+environment holding `META_ACCESS_TOKEN` and `META_APP_SECRET` as secrets, and the target as a
+`META_TEST_CONFIG_CONTENT` variable. That workflow is dispatch-only; it never runs on push or pull
+request, and it validates every field before invoking Bazel, because the test skips rather than
+fails when one is missing.
+
+```json
+{
+  "entity_id": "120248894211430672",
+  "entity_type": "campaign",
+  "start_epoch_seconds": 1778644800,
+  "end_epoch_seconds": 1780286400,
+  "expected_impressions": 54012
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `entity_id` | string | Campaign / ad / ad set / account ID |
+| `entity_type` | string | One of `campaign`, `ad`, `creative`, `ad_set`, `adset`, `account`, `ad_account` |
+| `start_epoch_seconds` | integer | Interval start — local midnight in the account's timezone |
+| `end_epoch_seconds` | integer | Interval end, exclusive — local midnight, after the start |
+| `expected_impressions` | integer | The count the query must return exactly |
 
 Locally:
 
@@ -99,7 +118,7 @@ bazel test \
   //src/test/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaMarketingApiInsightsClientRealTest \
   --test_env=META_ACCESS_TOKEN \
   --test_env=META_APP_SECRET \
-  --test_env=META_TEST_ENTITY_ID \
+  --test_env=META_TEST_ENTITY_ID --test_env=META_TEST_ENTITY_TYPE \
   --test_env=META_TEST_START_EPOCH_SECONDS \
   --test_env=META_TEST_END_EPOCH_SECONDS \
   --test_output=all
