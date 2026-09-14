@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars and fill in. Values marked TODO are unknown pending the
+# infrastructure-ownership decisions discussed on the PR.
+
+# TODO: which project does this deploy into?
+project_id = "REPLACE_ME"
+region     = "us-central1"
+
+# TODO: the service account Terraform itself runs as.
+terraform_service_account = "REPLACE_ME@REPLACE_ME.iam.gserviceaccount.com"
+
+# Produce with:
+#   bazel build //src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaImpressionQueryFunction_deploy.jar
+# then copy the jar into a directory containing nothing else — gcloud uploads the whole directory.
+uber_jar_path = "/tmp/meta-cf-staging/MetaImpressionQueryFunction_deploy.jar"
+
+# TODO: the Results Fulfiller service account. Leave empty for a manual smoke test, where you
+# invoke with your own identity via `gcloud auth print-identity-token`.
+invoker_service_accounts = []
+
+# Must stay below EdpValidationPostProcessor's 30-second deadline.
+timeout_seconds = 25
