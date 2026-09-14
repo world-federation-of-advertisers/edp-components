@@ -27,6 +27,9 @@ import java.net.URLDecoder
 import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
 import java.time.Instant
+import java.util.logging.Handler
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 import kotlin.test.assertFailsWith
 import org.junit.After
 import org.junit.Before
@@ -45,6 +48,9 @@ class MetaMarketingApiInsightsClientTest {
   private var insightsIndex = 0
   private var accountIdBody = """{"account_id":"999","id":"111"}"""
   private var timezoneBody = """{"timezone_name":"Asia/Tokyo","id":"act_999"}"""
+
+  /** Value served as `x-business-use-case-usage`, or null to omit the header. */
+  private var quotaHeader: String? = null
 
   @Before
   fun startServer() {
@@ -72,17 +78,22 @@ class MetaMarketingApiInsightsClientTest {
         else -> 500 to """{"error":{"message":"unexpected request","code":1}}"""
       }
     val bytes = body.toByteArray(StandardCharsets.UTF_8)
+    quotaHeader?.let { exchange.responseHeaders.add("x-business-use-case-usage", it) }
     exchange.sendResponseHeaders(status, bytes.size.toLong())
     exchange.responseBody.use { it.write(bytes) }
   }
 
-  private fun client() =
+  /**
+   * [quotaLogSampleInterval] mirrors the client's own default; only the sampling test overrides it.
+   */
+  private fun client(quotaLogSampleInterval: Long = 1_000L) =
     MetaMarketingApiInsightsClient(
       accessToken = ACCESS_TOKEN,
       appSecret = APP_SECRET,
       apiVersion = API_VERSION,
       graphApiBase = "http://127.0.0.1:${server.address.port}",
       httpClient = HttpClient.newHttpClient(),
+      quotaLogSampleInterval = quotaLogSampleInterval,
     )
 
   private fun insightsRequest(): URI = requestUris.single { it.path.endsWith("/insights") }
@@ -347,6 +358,193 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
+  fun `classifies every recognised throttle code as MetaRateLimitException`() {
+    // Each code has to be exercised: they are what distinguishes a throttle from an ordinary 400,
+    // so one going unclassified would silently regress to a generic API error.
+    for (code in listOf(80000L, 80004L, 4L, 17L, 341L, 613L)) {
+      insightsIndex = 0
+      insightsResponses = listOf(400 to """{"error":{"message":"too many calls","code":$code}}""")
+
+      assertFailsWith<MetaRateLimitException>("code $code should classify as a throttle") {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+    }
+  }
+
+  @Test
+  fun `does not classify Pages throttle codes, which this client never triggers`() {
+    // 80001 and 32 are documented for the Pages API. This client calls ad objects and Insights, so
+    // treating them as throttles here would be classifying a response we cannot receive.
+    for (code in listOf(80001L, 32L)) {
+      insightsIndex = 0
+      insightsResponses = listOf(400 to """{"error":{"message":"page limit","code":$code}}""")
+
+      val failure =
+        assertFailsWith<MetaApiException> {
+          client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+        }
+
+      assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    }
+  }
+
+  @Test
+  fun `classifies an Ads Insights throttle as MetaRateLimitException, not a generic API error`() {
+    // Meta signals Business Use Case throttling with HTTP 400 and code 80000 — never HTTP 429,
+    // which the Marketing API does not return. Status alone cannot distinguish this from a
+    // malformed request, so classification has to come from `code`.
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"(#80000) There have been too many calls from this ad-account.",
+             "type":"OAuthException","code":80000,"error_subcode":2446079,
+             "fbtrace_id":"AbC123"}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `a throttled response never sums to zero impressions`() {
+    // The failure mode this guards against: a throttle that degrades to a skip looks identical to
+    // a campaign that genuinely did not deliver. Today the day-alignment guard means requests
+    // rarely reach Meta at all, so throttling is not yet observable — that coupling is
+    // load-bearing and undocumented. When the interval handling is fixed (#4) and real volume
+    // starts flowing, a throttle misread as zero would silently under-report a live advertiser.
+    insightsResponses =
+      listOf(
+        400 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isInstanceOf(MetaApiException::class.java)
+  }
+
+  @Test
+  fun `prefers the error code over the HTTP status when classifying`() {
+    // Status is the weaker signal: Meta answers throttling, expired credentials and malformed
+    // requests all with 400, so a recognised `code` has to win over status. Pinned because it is
+    // the one case where classifying by status and classifying by code disagree — without this,
+    // the ordering in exceptionFor could be reversed and every other test would still pass.
+    insightsResponses =
+      listOf(
+        404 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `throws MetaApiException when a failure carries no parseable error object`() {
+    // Infrastructure between us and Meta can fail with a non-JSON body — a proxy's HTML error
+    // page, or nothing at all. That reaches a different branch than a malformed 200 body, which
+    // is parsed as an Insights page rather than as an error.
+    insightsResponses = listOf(502 to "<html><body>Bad Gateway</body></html>")
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    assertThat(failure).hasMessageThat().contains("502")
+  }
+
+  @Test
+  fun `classifies an expired token as MetaAuthException`() {
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"Error validating access token: Session has expired.",
+             "type":"OAuthException","code":190,"error_subcode":463}}"""
+      )
+
+    assertFailsWith<MetaAuthException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `an ordinary bad request stays a plain MetaApiException`() {
+    // Same HTTP status as the throttle and the expired token above; only `code` differs.
+    insightsResponses =
+      listOf(
+        400 to """{"error":{"message":"(#100) bad field","type":"OAuthException","code":100}}"""
+      )
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
+    assertThat(failure).isNotInstanceOf(MetaAuthException::class.java)
+  }
+
+  @Test
+  fun `carries quota headers on a non-2xx throttle`() {
+    quotaHeader = """{"1":[{"type":"ads_insights","call_count":100}]}"""
+    insightsResponses = listOf(400 to """{"error":{"message":"too many","code":80000}}""")
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("ads_insights")
+  }
+
+  @Test
+  fun `carries quota headers on a throttle embedded in a 200 during a node lookup`() {
+    // The account and timezone lookups parse through parseNode, a separate path from the Insights
+    // page. A throttle arriving there previously reached the boundary with no quota context.
+    quotaHeader = """{"1":[{"type":"ads_management","call_count":100}]}"""
+    accountIdBody = """{"error":{"message":"too many","code":80004}}"""
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("ads_management")
+  }
+
+  @Test
+  fun `classifies a throttle embedded in a 200 body`() {
+    // Meta also embeds errors in successful responses; that path must classify identically.
+    insightsResponses =
+      listOf(
+        200 to """{"error":{"message":"too many calls","code":80000,"error_subcode":2446079}}"""
+      )
+
+    assertFailsWith<MetaRateLimitException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `surfaces fbtrace_id in the error message`() {
+    // Meta support asks for fbtrace_id first; losing it makes an escalation much slower.
+    insightsResponses =
+      listOf(400 to """{"error":{"message":"boom","code":100,"fbtrace_id":"TRACE-XYZ"}}""")
+
+    val failure =
+      assertFailsWith<MetaApiException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("TRACE-XYZ")
+  }
+
+  @Test
   fun `returns zero for a window with no delivery`() {
     // Verified against live Meta: an entity that did not deliver in the window returns HTTP 200
     // with an empty data array, no `paging` key and no `error` key. That is a real count of zero,
@@ -357,6 +555,54 @@ class MetaMarketingApiInsightsClientTest {
     val count = client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
 
     assertThat(count).isEqualTo(0L)
+  }
+
+  @Test
+  fun `samples quota logging every interval-th response and reports the true suppressed count`() {
+    // Sampling at 1, N, 2N leaves the first gap one response shorter than every later gap, so the
+    // entry at N claims to stand for N-1 suppressed responses when it stands for N-2. Sampling at
+    // 1, N+1, 2N+1 makes every gap the same length, so the claim is always true.
+    //
+    // Warm the ad-account and timezone caches with the quota header absent: those two lookups are
+    // also quota-bearing, and skipping them here makes every counted response an Insights response,
+    // so the sampled entries line up with the query numbers below.
+    quotaHeader = null
+    insightsResponses = List(QUERY_COUNT + 1) { 200 to """{"data":[]}""" }
+    val client = client(quotaLogSampleInterval = SAMPLE_INTERVAL)
+    client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    quotaHeader = """{"1":[{"type":"ads_insights","call_count":1}]}"""
+
+    val records = mutableListOf<LogRecord>()
+    val handler =
+      object : Handler() {
+        override fun publish(record: LogRecord) {
+          records.add(record)
+        }
+
+        override fun flush() {}
+
+        override fun close() {}
+      }
+    val logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
+    logger.addHandler(handler)
+    val entriesAfterEachQuery =
+      try {
+        (1..QUERY_COUNT).map {
+          client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+          records.size
+        }
+      } finally {
+        logger.removeHandler(handler)
+      }
+
+    // An entry after queries 1, 4 and 7 — never 3 or 6, which is what the off-by-one cadence gave.
+    assertThat(entriesAfterEachQuery).containsExactly(1, 1, 1, 2, 2, 2, 3).inOrder()
+    assertThat(records).hasSize(3)
+    assertThat(records[0].message).contains("(suppressed 0 since the previous entry)")
+    assertThat(records[1].message)
+      .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
+    assertThat(records[2].message)
+      .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
   }
 
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
@@ -371,5 +617,9 @@ class MetaMarketingApiInsightsClientTest {
     private const val APP_SECRET = "test-secret"
     private const val API_VERSION = "v25.0"
     private val UNFILTERED = MetaDemographicFilter.UNFILTERED
+
+    // Small enough that the sampling test can reach three entries in a handful of queries.
+    private const val SAMPLE_INTERVAL = 3L
+    private const val QUERY_COUNT = 7
   }
 }
