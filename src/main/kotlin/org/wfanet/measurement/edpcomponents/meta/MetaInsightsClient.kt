@@ -60,6 +60,10 @@ data class MetaDemographicFilter(
   val ages: Set<MetaAgeBracket> = emptySet(),
   val genders: Set<MetaGender> = emptySet(),
 ) {
+  /** Whether this restricts neither dimension, and so needs no demographic breakdown. */
+  val isUnfiltered: Boolean
+    get() = ages.isEmpty() && genders.isEmpty()
+
   companion object {
     /** No demographic restriction — total impressions for the campaigns over the interval. */
     val UNFILTERED = MetaDemographicFilter()

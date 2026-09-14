@@ -26,9 +26,9 @@ Bazel registry).
    `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
    `FILTER_NOT_SUPPORTED`. Age/gender breakdown translation is tracked as a TODO (see Status).
-4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, build the day-granular
-   `time_range`, query Graph API Insights (`breakdowns=age,gender`), follow paging, sum matching
-   buckets.
+4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, split the interval into the
+   Insights queries that cover it exactly (one daily query for the interior whole days, one hourly
+   query per partial boundary day), query Graph API Insights, follow paging, sum matching buckets.
 5. Return the count, or a skip reason.
 
 ## Auth
@@ -42,11 +42,15 @@ Bazel registry).
 tagged `manual`, so `bazel test //...` never picks it up, and it self-skips when its environment
 variables are unset.
 
-**The interval must be whole days in the ad account's own timezone.** Meta answers only
-account-midnight-aligned day ranges, so a UTC-midnight window on a non-UTC account is rejected
-before any request is sent (see
-[#4](https://github.com/world-federation-of-advertisers/edp-components/issues/4)). Look the account
-timezone up first:
+**The interval must fall on whole hours in the ad account's own timezone.** Meta answers whole days,
+and whole hours within one day, in that timezone. An interval that is not day-aligned there is
+covered exactly by querying the interior whole days plus the hourly buckets of each partial boundary
+day, so a UTC-midnight window on a non-UTC account works. Two cases still cannot be reconstructed
+and are rejected before any request is sent: a bound that is not a whole hour locally (a half-hour
+offset zone such as `Asia/Kolkata` puts a UTC bound mid-bucket), and a partial boundary day that
+repeats an hour for a daylight-saving fall-back.
+
+Look the account timezone up to work out which case you are in:
 
 ```bash
 PROOF=$(printf '%s' "$META_ACCESS_TOKEN" | openssl dgst -sha256 -hmac "$META_APP_SECRET" | sed 's/^.*= *//')
