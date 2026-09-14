@@ -27,6 +27,9 @@ import java.net.URLDecoder
 import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
 import java.time.Instant
+import java.util.logging.Handler
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 import kotlin.test.assertFailsWith
 import org.junit.After
 import org.junit.Before
@@ -80,13 +83,17 @@ class MetaMarketingApiInsightsClientTest {
     exchange.responseBody.use { it.write(bytes) }
   }
 
-  private fun client() =
+  /**
+   * [quotaLogSampleInterval] mirrors the client's own default; only the sampling test overrides it.
+   */
+  private fun client(quotaLogSampleInterval: Long = 1_000L) =
     MetaMarketingApiInsightsClient(
       accessToken = ACCESS_TOKEN,
       appSecret = APP_SECRET,
       apiVersion = API_VERSION,
       graphApiBase = "http://127.0.0.1:${server.address.port}",
       httpClient = HttpClient.newHttpClient(),
+      quotaLogSampleInterval = quotaLogSampleInterval,
     )
 
   private fun insightsRequest(): URI = requestUris.single { it.path.endsWith("/insights") }
@@ -550,6 +557,54 @@ class MetaMarketingApiInsightsClientTest {
     assertThat(count).isEqualTo(0L)
   }
 
+  @Test
+  fun `samples quota logging every interval-th response and reports the true suppressed count`() {
+    // Sampling at 1, N, 2N leaves the first gap one response shorter than every later gap, so the
+    // entry at N claims to stand for N-1 suppressed responses when it stands for N-2. Sampling at
+    // 1, N+1, 2N+1 makes every gap the same length, so the claim is always true.
+    //
+    // Warm the ad-account and timezone caches with the quota header absent: those two lookups are
+    // also quota-bearing, and skipping them here makes every counted response an Insights response,
+    // so the sampled entries line up with the query numbers below.
+    quotaHeader = null
+    insightsResponses = List(QUERY_COUNT + 1) { 200 to """{"data":[]}""" }
+    val client = client(quotaLogSampleInterval = SAMPLE_INTERVAL)
+    client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    quotaHeader = """{"1":[{"type":"ads_insights","call_count":1}]}"""
+
+    val records = mutableListOf<LogRecord>()
+    val handler =
+      object : Handler() {
+        override fun publish(record: LogRecord) {
+          records.add(record)
+        }
+
+        override fun flush() {}
+
+        override fun close() {}
+      }
+    val logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
+    logger.addHandler(handler)
+    val entriesAfterEachQuery =
+      try {
+        (1..QUERY_COUNT).map {
+          client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+          records.size
+        }
+      } finally {
+        logger.removeHandler(handler)
+      }
+
+    // An entry after queries 1, 4 and 7 — never 3 or 6, which is what the off-by-one cadence gave.
+    assertThat(entriesAfterEachQuery).containsExactly(1, 1, 1, 2, 2, 2, 3).inOrder()
+    assertThat(records).hasSize(3)
+    assertThat(records[0].message).contains("(suppressed 0 since the previous entry)")
+    assertThat(records[1].message)
+      .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
+    assertThat(records[2].message)
+      .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
+  }
+
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
 
   private fun alignedInterval() = interval {
@@ -562,5 +617,9 @@ class MetaMarketingApiInsightsClientTest {
     private const val APP_SECRET = "test-secret"
     private const val API_VERSION = "v25.0"
     private val UNFILTERED = MetaDemographicFilter.UNFILTERED
+
+    // Small enough that the sampling test can reach three entries in a handful of queries.
+    private const val SAMPLE_INTERVAL = 3L
+    private const val QUERY_COUNT = 7
   }
 }

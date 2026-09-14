@@ -60,6 +60,9 @@ import javax.crypto.spec.SecretKeySpec
  * Meta's server-to-server hardening, so a leaked token alone cannot be replayed.
  * https://developers.facebook.com/docs/graph-api/guides/secure-requests
  *
+ * [quotaLogSampleInterval] is how many quota-bearing responses each sampled log entry stands for; 1
+ * logs every response.
+ *
  * TODO(@jojijacob): Add the async Insights report-run path (POST report run -> poll -> fetch) for
  *   entities/intervals whose synchronous query exceeds Meta's row/time limits.
  * TODO(world-federation-of-advertisers/edp-components#3): Add a real Meta-sandbox integration test
@@ -73,7 +76,14 @@ class MetaMarketingApiInsightsClient(
   private val graphApiBase: String = GRAPH_API_BASE,
   private val httpClient: HttpClient =
     HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
+  private val quotaLogSampleInterval: Long = DEFAULT_QUOTA_LOG_SAMPLE_INTERVAL,
 ) : MetaInsightsClient {
+
+  init {
+    require(quotaLogSampleInterval > 0) {
+      "quotaLogSampleInterval must be positive, got $quotaLogSampleInterval"
+    }
+  }
 
   // HMAC-SHA256 of the access token keyed by the app secret, in lowercase hex. Constant per client
   // instance (token and secret are fixed), so it is computed once and appended to every request.
@@ -292,12 +302,15 @@ class MetaMarketingApiInsightsClient(
     val headers = throttleHeadersOf(response)
     if (headers.isEmpty()) return
     val seen = quotaResponsesSeen.incrementAndGet()
-    if (seen == 1L || seen % QUOTA_LOG_SAMPLE_INTERVAL == 0L) {
-      val suppressed = if (seen == 1L) 0 else QUOTA_LOG_SAMPLE_INTERVAL - 1
-      logger.info(
-        "Meta quota for $nodeForError: $headers (suppressed $suppressed since the previous entry)"
-      )
-    }
+    // Sample the first response and every quotaLogSampleInterval-th one after it (1, 1001, 2001,
+    // ...), so each entry after the first stands for exactly quotaLogSampleInterval - 1 suppressed
+    // responses. Sampling at 1, 1000, 2000 instead makes only the second gap short, and its entry
+    // would claim one more suppressed response than it actually stood for.
+    if ((seen - 1) % quotaLogSampleInterval != 0L) return
+    val suppressed = if (seen == 1L) 0 else quotaLogSampleInterval - 1
+    logger.info(
+      "Meta quota for $nodeForError: $headers (suppressed $suppressed since the previous entry)"
+    )
   }
 
   private fun parseInsightsPage(
@@ -451,7 +464,7 @@ class MetaMarketingApiInsightsClient(
 
     // Successful responses are sampled rather than logged individually: at report-creation volume
     // one line per Graph call would be unusable, but quota climbs silently without any.
-    private const val QUOTA_LOG_SAMPLE_INTERVAL = 1_000L
+    private const val DEFAULT_QUOTA_LOG_SAMPLE_INTERVAL = 1_000L
 
     private val logger: Logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
   }
