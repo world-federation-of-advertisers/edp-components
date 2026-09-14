@@ -1,0 +1,114 @@
+# Copyright 2026 The Cross-Media Measurement Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Runs the live-Meta test against the real Marketing API. Manual dispatch only: it consumes Meta
+# API quota and needs credentials, so it must never run on push or pull_request.
+name: Live Meta test
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub-managed environment supplying the Meta credentials and target"
+        type: environment
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  live-meta-test:
+    name: Live Meta test
+    runs-on: ubuntu-24.04
+    # Gates the credentials behind whatever protection rules the environment carries.
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Check out revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Bazel
+        uses: world-federation-of-advertisers/actions/setup-bazel@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
+
+      # Target fields are not credentials, so they travel together as one variable rather than as
+      # five. The token and app secret come from environment secrets: Actions variables are not
+      # masked in logs.
+      # Everything the run needs is validated here, because the test itself skips rather than
+      # fails when a variable is missing — so an unvalidated run reports success without ever
+      # contacting Meta.
+      - name: Validate credentials and target configuration
+        env:
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
+          META_TEST_CONFIG_CONTENT: ${{ vars.META_TEST_CONFIG_CONTENT }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: |
+          set -euo pipefail
+
+          fail() { echo "$1 (environment: $ENVIRONMENT_NAME)" >&2; exit 1; }
+
+          [[ -n "$META_ACCESS_TOKEN" ]] || fail "secrets.META_ACCESS_TOKEN is not set"
+          [[ -n "$META_APP_SECRET" ]] || fail "secrets.META_APP_SECRET is not set"
+          [[ -n "$META_TEST_CONFIG_CONTENT" ]] || fail "vars.META_TEST_CONFIG_CONTENT is empty"
+
+          jq -e . >/dev/null <<<"$META_TEST_CONFIG_CONTENT" ||
+            fail "META_TEST_CONFIG_CONTENT is not valid JSON"
+
+          read_field() {
+            local value
+            value="$(jq -r --arg f "$1" '.[$f] // empty' <<<"$META_TEST_CONFIG_CONTENT")"
+            [[ -n "$value" ]] || fail "META_TEST_CONFIG_CONTENT.$1 is missing or empty"
+            printf '%s' "$value"
+          }
+
+          entity_id="$(read_field entity_id)"
+          entity_type="$(read_field entity_type)"
+          start="$(read_field start_epoch_seconds)"
+          end="$(read_field end_epoch_seconds)"
+          expected="$(read_field expected_impressions)"
+
+          case "$entity_type" in
+            campaign|ad|creative|ad_set|adset|account|ad_account) ;;
+            *) fail "unsupported entity_type: $entity_type" ;;
+          esac
+
+          for pair in "start_epoch_seconds:$start" "end_epoch_seconds:$end" \
+                      "expected_impressions:$expected"; do
+            [[ "${pair#*:}" =~ ^[0-9]+$ ]] || fail "${pair%%:*} must be a nonnegative integer"
+          done
+          (( start < end )) || fail "start_epoch_seconds must be before end_epoch_seconds"
+
+          {
+            echo "META_TEST_ENTITY_ID=$entity_id"
+            echo "META_TEST_ENTITY_TYPE=$entity_type"
+            echo "META_TEST_START_EPOCH_SECONDS=$start"
+            echo "META_TEST_END_EPOCH_SECONDS=$end"
+            echo "META_TEST_EXPECTED_IMPRESSIONS=$expected"
+          } >> "$GITHUB_ENV"
+
+      - name: Run
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: >
+          bazel test
+          //src/test/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaMarketingApiInsightsClientRealTest
+          --test_env=META_ACCESS_TOKEN
+          --test_env=META_APP_SECRET
+          --test_env=META_TEST_ENTITY_ID
+          --test_env=META_TEST_ENTITY_TYPE
+          --test_env=META_TEST_START_EPOCH_SECONDS
+          --test_env=META_TEST_END_EPOCH_SECONDS
+          --test_env=META_TEST_EXPECTED_IMPRESSIONS
+          --test_output=all
+          --nocache_test_results
