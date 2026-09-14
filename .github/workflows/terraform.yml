@@ -19,10 +19,9 @@ on:
     branches:
       - main
       - 'releases/**'
+  # Deliberately unfiltered by base branch: a pull request stacked on another pull request has that
+  # parent branch as its base, so a main-only filter silently runs nothing for it.
   pull_request:
-    branches:
-      - main
-      - 'releases/**'
   workflow_dispatch:
 
 permissions:
