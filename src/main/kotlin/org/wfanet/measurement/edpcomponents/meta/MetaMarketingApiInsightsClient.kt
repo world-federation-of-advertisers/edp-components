@@ -32,6 +32,7 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.format.DateTimeParseException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Logger
@@ -53,9 +54,10 @@ import javax.crypto.spec.SecretKeySpec
  * extra Graph call, cached per account) and covers the interval exactly with the queries
  * [planQuery] produces: one daily query for the interior whole days, plus an hourly query for each
  * partial boundary day counting only the in-interval buckets. A day-aligned interval is still a
- * single daily query. What cannot be reconstructed exactly — a bound off a whole hour, or a
- * boundary day that repeats an hour for a daylight-saving change — raises
- * [MetaIntervalNotSupportedException] rather than returning an approximation.
+ * single daily query. A bound inside an hour a daylight-saving fall-back repeats resolves to the
+ * earlier edge of Meta's shared bucket; a bound Meta cannot express at all raises
+ * [MetaIntervalNotSupportedException] rather than being approximated. See [planQuery] and
+ * [MetaIntervalNotSupportedException].
  *
  * Auth: [accessToken] is a Meta System User token and [appSecret] is the Meta app secret, both
  * loaded from Secret Manager by the caller — they never leave this environment. Every request
@@ -241,17 +243,25 @@ class MetaMarketingApiInsightsClient(
    * are a single daily query; each partial boundary day is an hourly query whose in-interval
    * buckets are summed. That is at most two extra requests however long the interval is.
    *
-   * @throws MetaIntervalNotSupportedException if [interval] is empty, a bound is not on a whole
-   *   hour in [zone], or a partial boundary day repeats an hour for a daylight-saving change.
+   * A daylight-saving fall-back repeats a local hour, and Meta shares one bucket between both
+   * occurrences. That needs no special handling here: the plan is built from local date and local
+   * hour, which are identical for the two occurrences, so a bound at either one includes or
+   * excludes the whole shared bucket rather than splitting it. The effect is that a bound inside a
+   * repeated hour resolves to the earlier of the two representable edges, which are equidistant.
+   *
+   * @throws MetaIntervalNotSupportedException if [interval] is empty, or a bound is not on a whole
+   *   hour in [zone].
    */
   private fun planQuery(interval: Interval, zone: ZoneId): List<QuerySegment> {
     val start = instantOf(interval.startTime).atZone(zone)
     val end = instantOf(interval.endTime).atZone(zone)
-    if (!end.isAfter(start)) {
-      throw MetaIntervalNotSupportedException("Interval is empty (start=$start, end=$end)")
-    }
     requireWholeHour(start, "start", zone)
     requireWholeHour(end, "end", zone)
+    if (!end.isAfter(start)) {
+      throw MetaIntervalNotSupportedException(
+        "Interval is empty (start=$start, end=$end) in ad account timezone $zone"
+      )
+    }
 
     val startsAtMidnight = start.toLocalTime() == LocalTime.MIDNIGHT
     val endsAtMidnight = end.toLocalTime() == LocalTime.MIDNIGHT
@@ -268,13 +278,13 @@ class MetaMarketingApiInsightsClient(
         listOf(QuerySegment(firstDay, firstDay))
       } else {
         val toHour = if (endsAtMidnight) HOURS_PER_DAY else end.hour
-        listOf(hourlySegment(firstDay, start.hour, toHour, zone))
+        listOf(hourlySegment(firstDay, start.hour, toHour))
       }
     }
 
     return buildList {
       if (!startsAtMidnight) {
-        add(hourlySegment(firstDay, start.hour, HOURS_PER_DAY, zone))
+        add(hourlySegment(firstDay, start.hour, HOURS_PER_DAY))
       }
       val wholeFrom = if (startsAtMidnight) firstDay else firstDay.plusDays(1)
       val wholeTo = if (endsAtMidnight) lastDay else lastDay.minusDays(1)
@@ -282,35 +292,14 @@ class MetaMarketingApiInsightsClient(
         add(QuerySegment(wholeFrom, wholeTo))
       }
       if (!endsAtMidnight) {
-        add(hourlySegment(lastDay, 0, end.hour, zone))
+        add(hourlySegment(lastDay, 0, end.hour))
       }
     }
   }
 
-  /**
-   * An hourly [QuerySegment] over `[fromHour, toHourExclusive)` of [date].
-   *
-   * @throws MetaIntervalNotSupportedException if [date] repeats a local hour for a daylight-saving
-   *   fall-back in [zone]. Meta labels hourly buckets by local hour only, so both occurrences of
-   *   the repeated hour share one bucket and neither can be attributed to the requested interval. A
-   *   spring-forward day is fine: every bucket still maps to at most one real hour, and the hour
-   *   that does not exist simply returns no row.
-   */
-  private fun hourlySegment(
-    date: LocalDate,
-    fromHour: Int,
-    toHourExclusive: Int,
-    zone: ZoneId,
-  ): QuerySegment {
-    val dayLength = Duration.between(date.atStartOfDay(zone), date.plusDays(1).atStartOfDay(zone))
-    if (dayLength > Duration.ofHours(HOURS_PER_DAY.toLong())) {
-      throw MetaIntervalNotSupportedException(
-        "Partial boundary day $date repeats an hour for a daylight-saving change in ad account " +
-          "timezone $zone, so Meta's hourly buckets cannot be mapped to the requested interval"
-      )
-    }
-    return QuerySegment(date, date, fromHour until toHourExclusive)
-  }
+  /** An hourly [QuerySegment] over `[fromHour, toHourExclusive)` of [date]. */
+  private fun hourlySegment(date: LocalDate, fromHour: Int, toHourExclusive: Int): QuerySegment =
+    QuerySegment(date, date, fromHour until toHourExclusive)
 
   /**
    * Requires [time] to fall on a whole hour in [zone]. A zone at a half-hour offset (for example
@@ -327,10 +316,35 @@ class MetaMarketingApiInsightsClient(
     }
   }
 
-  /** Parses the local hour from a Meta hourly bucket label, which reads `HH:00:00 - HH:59:59`. */
-  private fun hourOf(bucket: String, nodeForError: String): Int =
-    bucket.substringBefore(':').toIntOrNull()?.takeIf { it in 0 until HOURS_PER_DAY }
-      ?: throw MetaApiException("Unrecognized hourly bucket '$bucket' for $nodeForError")
+  /**
+   * Parses the local hour from a Meta hourly bucket label, which reads `HH:00:00 - HH:59:59`.
+   *
+   * Both endpoints are parsed and checked rather than the leading number alone: a label this client
+   * cannot place is not zero delivery, and counting it as such would silently undercount the
+   * interval. Meta types this field as a plain string, so its shape is worth asserting.
+   *
+   * @throws MetaApiException if [bucket] is not one whole local hour in that form.
+   */
+  private fun hourOf(bucket: String, nodeForError: String): Int {
+    fun reject(cause: Throwable? = null): Nothing =
+      throw MetaApiException(
+        "Unrecognized $HOURLY_BREAKDOWN value '$bucket' for $nodeForError; expected " +
+          "'HH:00:00${BUCKET_DELIMITER}HH:59:59'",
+        cause,
+      )
+
+    val endpoints = bucket.split(BUCKET_DELIMITER)
+    if (endpoints.size != 2) reject()
+    val (from, to) =
+      try {
+        LocalTime.parse(endpoints[0]) to LocalTime.parse(endpoints[1])
+      } catch (e: DateTimeParseException) {
+        reject(e)
+      }
+    if (from != LocalTime.of(from.hour, 0)) reject()
+    if (to != LocalTime.of(from.hour, 59, 59)) reject()
+    return from.hour
+  }
 
   /**
    * One Insights query covering part of the requested interval.
@@ -555,6 +569,8 @@ class MetaMarketingApiInsightsClient(
     // Buckets a single day into 24 rows labelled by hour in the ad account's timezone. Over a range
     // it sums each hour across every day in the range, so a segment using it covers one day.
     private const val HOURLY_BREAKDOWN = "hourly_stats_aggregated_by_advertiser_time_zone"
+    // Separator between the two endpoints of an hourly bucket label.
+    private const val BUCKET_DELIMITER = " - "
     // Bucket count Meta returns per day, including on a 23- or 25-hour daylight-saving day.
     private const val HOURS_PER_DAY = 24
     // Per-connection and per-request ceilings so a stalled Meta call can't hang the function: a

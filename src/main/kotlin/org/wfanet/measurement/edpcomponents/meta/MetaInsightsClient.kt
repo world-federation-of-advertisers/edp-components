@@ -32,10 +32,15 @@ interface MetaInsightsClient {
    * Returns the total Meta impression count across [targets] over [timeInterval], restricted to the
    * demographic buckets in [demographics].
    *
+   * [timeInterval] need not be day-aligned in the ad account's timezone. A bound on a Meta bucket
+   * boundary there is answered exactly. The one bound that is not on a boundary — one inside an
+   * hour a daylight-saving fall-back repeats, which Meta reports as a single bucket — resolves to
+   * the earlier edge of that bucket, so the count can cover up to an hour more than requested.
+   *
    * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.
-   * @throws MetaIntervalNotSupportedException if [timeInterval] cannot be expressed as a Meta
-   *   day-granular `time_range` (not midnight-aligned in the ad account's timezone).
+   * @throws MetaIntervalNotSupportedException if [timeInterval] cannot be expressed in Meta's
+   *   buckets at all, or is empty once adjusted.
    */
   fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -125,8 +130,17 @@ class MetaAuthException(message: String, cause: Throwable? = null) :
   MetaApiException(message, cause)
 
 /**
- * The requested time interval cannot be expressed as a Meta day-granular `time_range` — i.e. it is
- * not aligned to midnight boundaries in the ad account's timezone. Meta Insights only supports
- * whole days in the account's timezone, so sub-day or unaligned intervals cannot be answered.
+ * The requested time interval cannot be expressed in Meta's buckets.
+ *
+ * Meta Insights measures whole days in the ad account's timezone, and whole hours within one such
+ * day. An interval that is not day-aligned there is still answered exactly, by combining the
+ * interior whole days with the hourly buckets of each partial boundary day. This is raised only
+ * when that is not possible:
+ * - A bound that is not on a whole hour in the account's timezone. A zone at a half-hour offset
+ *   (for example `Asia/Kolkata`) puts a UTC-aligned bound mid-bucket every time, not just at a
+ *   clock change, so no interval on such an account is reconstructable.
+ * - An empty interval.
+ * - An interval needing hourly boundary queries together with a demographic filter, which Meta does
+ *   not allow in one query.
  */
 class MetaIntervalNotSupportedException(message: String) : Exception(message)

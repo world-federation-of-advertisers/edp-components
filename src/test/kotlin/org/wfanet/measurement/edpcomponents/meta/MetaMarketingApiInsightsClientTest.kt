@@ -221,7 +221,7 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `throws MetaIntervalNotSupportedException when the interval is not day-aligned in account TZ`() {
+  fun `throws MetaIntervalNotSupportedException when a bound is not on a whole hour in account TZ`() {
     insightsResponses = listOf(200 to """{"data":[]}""") // should never be reached
 
     // 2026-06-30T15:30Z is 00:30 in Tokyo — not a midnight boundary.
@@ -751,24 +751,65 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `skips a partial boundary day that repeats an hour for a daylight-saving fall-back`() {
-    // America/New_York ends DST on 2026-11-01, making that local day 25 hours. Meta labels hourly
-    // buckets by local hour only, so the repeated hour is indistinguishable and cannot be
-    // attributed to the interval.
-    timezoneBody = """{"timezone_name":"America/New_York","id":"act_999"}"""
+  fun `stays exact when a fall-back repeated hour is wholly excluded`() {
+    // America/New_York ends DST on 2026-11-01, so local 01:00-01:59 happens twice and shares one
+    // bucket. Starting at 13:00 local leaves both occurrences outside the interval, so hours 13-23
+    // are reconstructable with no adjustment at all.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(1 to 900L, 13 to 8L, 23 to 2L), 200 to EMPTY_PAGE)
 
-    val failure =
-      assertFailsWith<MetaIntervalNotSupportedException> {
-        client()
-          .queryImpressions(
-            listOf(campaignTarget()),
-            intervalOf("2026-11-01T18:00:00Z", "2026-11-05T05:00:00Z"),
-            UNFILTERED,
-          )
-      }
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T18:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
 
-    assertThat(failure).hasMessageThat().contains("2026-11-01")
-    assertThat(failure).hasMessageThat().contains("daylight-saving")
+    assertThat(count).isEqualTo(10L)
+    assertThat(insightsQueries()[0])
+      .contains("""time_range={"since":"2026-11-01","until":"2026-11-01"}""")
+  }
+
+  @Test
+  fun `stays exact when a fall-back repeated hour is wholly included`() {
+    // Starting at 00:00 local puts both occurrences of the repeated hour inside the interval, so
+    // the whole bucket belongs to it and the count is exact.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"250"}]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T04:00:00Z", "2026-11-03T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(250L)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-11-01","until":"2026-11-02"}""")
+  }
+
+  @Test
+  fun `resolves a bound inside the fall-back repeated hour to the earlier edge of its bucket`() {
+    // 2026-11-01T06:00Z is the *second* 01:00 local; 05:00Z is the first. Meta shares one bucket
+    // between them, so a bound at either takes the whole bucket or none of it — never half. The
+    // plan keys off local hour, which is 1 for both, so the bound resolves to the earlier of the
+    // two equidistant edges and the bucket is wholly included.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(0 to 500L, 1 to 30L, 2 to 6L), 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T06:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 0 precedes the snapped start and is excluded; hour 1 is now wholly inside.
+    assertThat(count).isEqualTo(36L)
   }
 
   @Test
@@ -776,7 +817,7 @@ class MetaMarketingApiInsightsClientTest {
     // The mirror of the fall-back case: on 2026-03-08 the local day is 23 hours, but every bucket
     // still maps to at most one real hour, so the mapping stays exact. The hour that does not exist
     // simply returns no row.
-    timezoneBody = """{"timezone_name":"America/New_York","id":"act_999"}"""
+    timezoneBody = NEW_YORK_TIMEZONE
     insightsResponses = listOf(200 to hourlyPage(1 to 3L, 3 to 4L), 200 to """{"data":[]}""")
 
     val count =
@@ -794,7 +835,7 @@ class MetaMarketingApiInsightsClientTest {
   fun `keeps a whole daylight-saving day in the daily query`() {
     // The fall-back day is only a problem when it has to be split by hour. Wholly inside the
     // interval it is covered by the daily aggregate, which already includes the repeated hour.
-    timezoneBody = """{"timezone_name":"America/New_York","id":"act_999"}"""
+    timezoneBody = NEW_YORK_TIMEZONE
     insightsResponses = listOf(200 to """{"data":[{"impressions":"77"}]}""")
 
     val count =
@@ -899,6 +940,9 @@ class MetaMarketingApiInsightsClientTest {
     private val UNFILTERED = MetaDemographicFilter.UNFILTERED
 
     // Small enough that the sampling test can reach three entries in a handful of queries.
+    private const val NEW_YORK_TIMEZONE = """{"timezone_name":"America/New_York","id":"act_999"}"""
+    private const val EMPTY_PAGE = """{"data":[]}"""
+
     private const val SAMPLE_INTERVAL = 3L
     private const val QUERY_COUNT = 7
   }
