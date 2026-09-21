@@ -33,6 +33,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeParseException
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Logger
@@ -54,10 +55,9 @@ import javax.crypto.spec.SecretKeySpec
  * extra Graph call, cached per account) and covers the interval exactly with the queries
  * [planQuery] produces: one daily query for the interior whole days, plus an hourly query for each
  * partial boundary day counting only the in-interval buckets. A day-aligned interval is still a
- * single daily query. A bound inside an hour a daylight-saving fall-back repeats resolves to the
- * earlier edge of Meta's shared bucket; a bound Meta cannot express at all raises
- * [MetaIntervalNotSupportedException] rather than being approximated. See [planQuery] and
- * [MetaIntervalNotSupportedException].
+ * single daily query. A bound that is not on a bucket edge moves to the nearest one, logged as a
+ * requested-versus-effective interval; only an interval left empty by that raises
+ * [MetaIntervalNotSupportedException]. See [planQuery] and [MetaIntervalNotSupportedException].
  *
  * Auth: [accessToken] is a Meta System User token and [appSecret] is the Meta app secret, both
  * loaded from Secret Manager by the caller — they never leave this environment. Every request
@@ -249,17 +249,24 @@ class MetaMarketingApiInsightsClient(
    * excludes the whole shared bucket rather than splitting it. The effect is that a bound inside a
    * repeated hour resolves to the earlier of the two representable edges, which are equidistant.
    *
-   * @throws MetaIntervalNotSupportedException if [interval] is empty, or a bound is not on a whole
-   *   hour in [zone].
+   * @throws MetaIntervalNotSupportedException if [interval] is empty, as requested or once its
+   *   bounds are moved to bucket edges.
    */
   private fun planQuery(interval: Interval, zone: ZoneId): List<QuerySegment> {
-    val start = instantOf(interval.startTime).atZone(zone)
-    val end = instantOf(interval.endTime).atZone(zone)
-    requireWholeHour(start, "start", zone)
-    requireWholeHour(end, "end", zone)
+    val requestedStart = instantOf(interval.startTime).atZone(zone)
+    val requestedEnd = instantOf(interval.endTime).atZone(zone)
+    val start = snapToBucketEdge(requestedStart)
+    val end = snapToBucketEdge(requestedEnd)
     if (!end.isAfter(start)) {
       throw MetaIntervalNotSupportedException(
-        "Interval is empty (start=$start, end=$end) in ad account timezone $zone"
+        "Interval is empty in ad account timezone $zone: requested [$requestedStart, " +
+          "$requestedEnd), effective [$start, $end)"
+      )
+    }
+    if (start != requestedStart || end != requestedEnd) {
+      logger.info(
+        "Interval moved to Meta bucket edges in ad account timezone $zone: requested " +
+          "[$requestedStart, $requestedEnd), effective [$start, $end)"
       )
     }
 
@@ -302,18 +309,23 @@ class MetaMarketingApiInsightsClient(
     QuerySegment(date, date, fromHour until toHourExclusive)
 
   /**
-   * Requires [time] to fall on a whole hour in [zone]. A zone at a half-hour offset (for example
-   * `Asia/Kolkata`) puts a UTC-aligned bound in the middle of a Meta hourly bucket, which cannot be
-   * split.
+   * Moves [time] to the nearest Meta bucket edge — a whole hour in its own zone — breaking a tie
+   * toward the earlier edge.
+   *
+   * A zone at a half-hour offset (for example `Asia/Kolkata`) puts a UTC-aligned bound exactly
+   * halfway through a bucket, so every such bound ties and resolves earlier. Meta cannot split a
+   * bucket, so the alternative to moving the bound is answering nothing at all.
+   *
+   * The caller logs the requested and effective intervals whenever this changes either bound, and
+   * rejects an interval this leaves empty.
    */
-  private fun requireWholeHour(time: ZonedDateTime, bound: String, zone: ZoneId) {
-    val local: LocalTime = time.toLocalTime()
-    if (local.minute != 0 || local.second != 0 || local.nano != 0) {
-      throw MetaIntervalNotSupportedException(
-        "Interval $bound is $local in ad account timezone $zone, which is not a whole hour; " +
-          "Meta's smallest bucket is one hour"
-      )
-    }
+  private fun snapToBucketEdge(time: ZonedDateTime): ZonedDateTime {
+    val earlier: ZonedDateTime = time.truncatedTo(ChronoUnit.HOURS)
+    if (earlier == time) return time
+    val later: ZonedDateTime = earlier.plusHours(1)
+    val toEarlier = Duration.between(earlier, time)
+    val toLater = Duration.between(time, later)
+    return if (toEarlier <= toLater) earlier else later
   }
 
   /**

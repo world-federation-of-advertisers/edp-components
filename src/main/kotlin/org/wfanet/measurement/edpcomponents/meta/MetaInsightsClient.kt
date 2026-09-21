@@ -39,8 +39,8 @@ interface MetaInsightsClient {
    *
    * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.
-   * @throws MetaIntervalNotSupportedException if [timeInterval] cannot be expressed in Meta's
-   *   buckets at all, or is empty once adjusted.
+   * @throws MetaIntervalNotSupportedException if [timeInterval] is empty, as requested or once its
+   *   bounds are moved to bucket edges.
    */
   fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -130,16 +130,15 @@ class MetaAuthException(message: String, cause: Throwable? = null) :
   MetaApiException(message, cause)
 
 /**
- * The requested time interval cannot be expressed in Meta's buckets.
+ * The requested time interval cannot be answered in Meta's buckets.
  *
  * Meta Insights measures whole days in the ad account's timezone, and whole hours within one such
- * day. An interval that is not day-aligned there is still answered exactly, by combining the
- * interior whole days with the hourly buckets of each partial boundary day. This is raised only
- * when that is not possible:
- * - A bound that is not on a whole hour in the account's timezone. A zone at a half-hour offset
- *   (for example `Asia/Kolkata`) puts a UTC-aligned bound mid-bucket every time, not just at a
- *   clock change, so no interval on such an account is reconstructable.
- * - An empty interval.
+ * day. An interval that is not day-aligned there is answered by combining the interior whole days
+ * with the hourly buckets of each partial boundary day, and a bound that is not on a bucket edge is
+ * moved to the nearest one. This is raised only when even that leaves nothing to query:
+ * - An interval that is empty, either as requested or once its bounds are moved. A span shorter
+ *   than one bucket can collapse this way — on a zone at a half-hour offset, for example, both
+ *   bounds of a twenty-minute interval can resolve to the same edge.
  * - An interval needing hourly boundary queries together with a demographic filter, which Meta does
  *   not allow in one query.
  */

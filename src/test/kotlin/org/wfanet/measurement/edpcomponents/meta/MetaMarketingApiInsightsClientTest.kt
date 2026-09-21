@@ -17,6 +17,7 @@
 package org.wfanet.measurement.edpcomponents.meta
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.google.protobuf.timestamp
 import com.google.type.interval
 import com.sun.net.httpserver.HttpExchange
@@ -221,19 +222,22 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `throws MetaIntervalNotSupportedException when a bound is not on a whole hour in account TZ`() {
-    insightsResponses = listOf(200 to """{"data":[]}""") // should never be reached
+  fun `moves a sub-hour bound to the nearest bucket edge rather than rejecting it`() {
+    // 2026-06-30T15:30Z is 00:30 in Tokyo. It is nearer 00:00 than 01:00, so the interval starts at
+    // Tokyo midnight and the whole first day is queried daily rather than split by hour.
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"42"}]}""")
 
-    // 2026-06-30T15:30Z is 00:30 in Tokyo — not a midnight boundary.
-    val unaligned = interval {
-      startTime = timestamp { seconds = Instant.parse("2026-06-30T15:30:00Z").epochSecond }
-      endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
-    }
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-06-30T15:30:00Z", "2026-07-02T15:00:00Z"),
+          UNFILTERED,
+        )
 
-    assertFailsWith<MetaIntervalNotSupportedException> {
-      client().queryImpressions(listOf(campaignTarget()), unaligned, UNFILTERED)
-    }
-    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+    assertThat(count).isEqualTo(42L)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-07-01","until":"2026-07-02"}""")
   }
 
   @Test
@@ -853,22 +857,48 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `skips an interval that is not on a whole hour in the ad account timezone`() {
-    // Asia/Kolkata is UTC+5:30, so a UTC-midnight bound lands halfway through a Meta hourly bucket
-    // and no combination of buckets reproduces the interval.
-    timezoneBody = """{"timezone_name":"Asia/Kolkata","id":"act_999"}"""
+  fun `moves a half-hour-offset bound to the nearest bucket edge`() {
+    // Asia/Kolkata is UTC+5:30, so a UTC-midnight bound lands exactly halfway through a bucket.
+    // Both edges are thirty minutes away, so the tie resolves earlier: 05:30 local becomes 05:00.
+    timezoneBody = KOLKATA_TIMEZONE
+    insightsResponses =
+      listOf(200 to hourlyPage(4 to 900L, 5 to 11L, 23 to 4L), 200 to EMPTY_PAGE, 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 5 is inside the effective interval; hour 4 precedes it and is excluded.
+    assertThat(count).isEqualTo(15L)
+    assertThat(insightsQueries()[0])
+      .contains("""time_range={"since":"2026-07-01","until":"2026-07-01"}""")
+  }
+
+  @Test
+  fun `skips an interval that both bounds collapse onto the same bucket edge`() {
+    // A span shorter than one bucket, wholly inside its second half: on Asia/Kolkata these bounds
+    // are 05:40 and 05:50 local, and both are nearer 06:00 than 05:00, so both resolve to the same
+    // edge and the effective interval is empty. Nothing is queried.
+    timezoneBody = KOLKATA_TIMEZONE
 
     val failure =
       assertFailsWith<MetaIntervalNotSupportedException> {
         client()
           .queryImpressions(
             listOf(campaignTarget()),
-            intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+            // 05:40 and 05:50 local; both are nearer 06:00, so the effective interval is empty.
+            intervalOf("2026-07-01T00:10:00Z", "2026-07-01T00:20:00Z"),
             UNFILTERED,
           )
       }
 
-    assertThat(failure).hasMessageThat().contains("whole hour")
+    assertThat(failure).hasMessageThat().contains("empty")
+    assertThat(failure).hasMessageThat().contains("effective")
+    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
   }
 
   @Test
@@ -914,23 +944,32 @@ class MetaMarketingApiInsightsClientTest {
   fun `raises on an unrecognized hourly bucket label`() {
     // A bucket this client cannot place is not zero delivery — counting it as such would silently
     // undercount the interval.
-    insightsResponses =
-      listOf(
-        200 to
-          """{"data":[{"impressions":"5","hourly_stats_aggregated_by_advertiser_time_zone":"midday"}]}"""
-      )
+    // The first is rejected by any parser. The rest are the cases the old integer-prefix parser
+    // accepted: a start that is not the top of the hour, an end hour that does not match the start,
+    // and a label with no second endpoint at all.
+    val badLabels = listOf("midday", "09:30:00 - 09:59:59", "09:00:00 - 10:59:59", "09:00:00")
+    for (label in badLabels) {
+      requestUris.clear()
+      insightsIndex = 0
+      insightsResponses =
+        listOf(
+          200 to
+            """{"data":[{"impressions":"5",""" +
+              """"hourly_stats_aggregated_by_advertiser_time_zone":"$label"}]}"""
+        )
 
-    val failure =
-      assertFailsWith<MetaApiException> {
-        client()
-          .queryImpressions(
-            listOf(campaignTarget()),
-            intervalOf("2026-06-30T21:00:00Z", "2026-07-01T03:00:00Z"),
-            UNFILTERED,
-          )
-      }
+      val failure =
+        assertFailsWith<MetaApiException> {
+          client()
+            .queryImpressions(
+              listOf(campaignTarget()),
+              intervalOf("2026-06-30T21:00:00Z", "2026-07-01T03:00:00Z"),
+              UNFILTERED,
+            )
+        }
 
-    assertThat(failure).hasMessageThat().contains("midday")
+      assertWithMessage("label %s", label).that(failure).hasMessageThat().contains(label)
+    }
   }
 
   companion object {
@@ -940,6 +979,7 @@ class MetaMarketingApiInsightsClientTest {
     private val UNFILTERED = MetaDemographicFilter.UNFILTERED
 
     // Small enough that the sampling test can reach three entries in a handful of queries.
+    private const val KOLKATA_TIMEZONE = """{"timezone_name":"Asia/Kolkata","id":"act_999"}"""
     private const val NEW_YORK_TIMEZONE = """{"timezone_name":"America/New_York","id":"act_999"}"""
     private const val EMPTY_PAGE = """{"data":[]}"""
 
