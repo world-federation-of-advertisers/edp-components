@@ -39,11 +39,12 @@ import org.junit.runners.JUnit4
  * [MetaMarketingApiInsightsClientTest]. This class exists to confirm those same paths against Meta
  * itself, which no automated test can do.
  *
- * **The interval must be whole days in the ad account's own timezone.** Meta answers only
- * account-midnight-aligned day ranges, so a UTC-midnight window on a non-UTC account throws
- * [MetaIntervalNotSupportedException] before any request is sent. That is the behavior tracked in
- * edp-components#4; it is not a failure of this test. `META_TEST_START_EPOCH_SECONDS` and
- * `META_TEST_END_EPOCH_SECONDS` are therefore supplied directly rather than derived from dates.
+ * The interval need not be day-aligned in the ad account's timezone: the client covers the interior
+ * whole days with one query and each partial boundary day with an hourly one. A bound that is not
+ * on a Meta bucket edge moves to the nearest one, so an exact assertion is only meaningful for an
+ * interval whose bounds are already on bucket edges in that zone. `META_TEST_START_EPOCH_SECONDS`
+ * and `META_TEST_END_EPOCH_SECONDS` are supplied directly rather than derived from dates, so the
+ * caller controls that precisely.
  */
 @RunWith(JUnit4::class)
 class MetaMarketingApiInsightsClientRealTest {
@@ -72,7 +73,7 @@ class MetaMarketingApiInsightsClientRealTest {
   }
 
   @Test
-  fun `queries live Meta for an account-day-aligned interval`() {
+  fun `queries live Meta and reconstructs the requested interval exactly`() {
     val entityLevel =
       checkNotNull(MetaEntityLevels[entityType]) {
         "META_TEST_ENTITY_TYPE '$entityType' is not a supported entity type"
@@ -90,11 +91,13 @@ class MetaMarketingApiInsightsClientRealTest {
     val count: Long =
       client.queryImpressions(listOf(target), timeInterval, MetaDemographicFilter.UNFILTERED)
 
-    // Logged so a manual run is useful even without an expected value to assert against.
+    // Logged so a manual run shows what was queried. The count itself is deliberately omitted:
+    // an impression total for an identified entity is advertiser data, and this output can end up
+    // in a CI log. Assert against META_TEST_EXPECTED_IMPRESSIONS instead of reading it back.
     logger.info(
       "Live Meta query: node=${target.nodeId} level=${target.level} " +
         "interval=[${Instant.ofEpochSecond(startEpochSeconds!!.toLong())}, " +
-        "${Instant.ofEpochSecond(endEpochSeconds!!.toLong())}) -> impressions=$count"
+        "${Instant.ofEpochSecond(endEpochSeconds!!.toLong())})"
     )
 
     // A campaign with no delivery in the window legitimately returns 0, so only assert

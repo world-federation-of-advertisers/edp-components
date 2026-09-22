@@ -53,6 +53,9 @@ class MetaMarketingApiInsightsClientTest {
   /** Value served as `x-business-use-case-usage`, or null to omit the header. */
   private var quotaHeader: String? = null
 
+  /** Value served as `x-fb-ads-insights-throttle`, or null to omit the header. */
+  private var adsInsightsThrottleHeader: String? = null
+
   @Before
   fun startServer() {
     server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -80,6 +83,9 @@ class MetaMarketingApiInsightsClientTest {
       }
     val bytes = body.toByteArray(StandardCharsets.UTF_8)
     quotaHeader?.let { exchange.responseHeaders.add("x-business-use-case-usage", it) }
+    adsInsightsThrottleHeader?.let {
+      exchange.responseHeaders.add("x-fb-ads-insights-throttle", it)
+    }
     exchange.sendResponseHeaders(status, bytes.size.toLong())
     exchange.responseBody.use { it.write(bytes) }
   }
@@ -491,6 +497,52 @@ class MetaMarketingApiInsightsClientTest {
 
     assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
     assertThat(failure).isNotInstanceOf(MetaAuthException::class.java)
+  }
+
+  @Test
+  fun `carries the ads-insights throttle header into the throttle exception`() {
+    // Insights throttling is reported on its own header, separately from the Business Use Case and
+    // app-level counters, so a query can be throttled on this alone. Losing it from the exception
+    // would leave the operator unable to see which limit was actually hit.
+    adsInsightsThrottleHeader = """{"app_id_util_pct":100.0,"acc_id_util_pct":42.0}"""
+    insightsResponses = listOf(400 to """{"error":{"message":"too many","code":80000}}""")
+
+    val failure =
+      assertFailsWith<MetaRateLimitException> {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+
+    assertThat(failure).hasMessageThat().contains("x-fb-ads-insights-throttle")
+    assertThat(failure).hasMessageThat().contains("app_id_util_pct")
+  }
+
+  @Test
+  fun `includes the ads-insights throttle header in the sampled quota log`() {
+    // A successful response reports quota on this header too, and it is the only signal when the
+    // other two are absent — so it must both trigger the sampled log and appear in it.
+    adsInsightsThrottleHeader = """{"acc_id_util_pct":7.5}"""
+    insightsResponses = listOf(200 to """{"data":[]}""")
+
+    val records = mutableListOf<LogRecord>()
+    val handler =
+      object : Handler() {
+        override fun publish(record: LogRecord) {
+          records.add(record)
+        }
+
+        override fun flush() {}
+
+        override fun close() {}
+      }
+    val logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
+    logger.addHandler(handler)
+    try {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    } finally {
+      logger.removeHandler(handler)
+    }
+
+    assertThat(records.map { it.message }.filter { it.contains("acc_id_util_pct") }).isNotEmpty()
   }
 
   @Test
