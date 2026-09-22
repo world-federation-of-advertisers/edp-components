@@ -291,6 +291,7 @@ class MetaMarketingApiInsightsClient(
     ThrottleHeaders(
       businessUseCase = response.headers().firstValue(BUSINESS_USE_CASE_USAGE_HEADER).orElse(null),
       appUsage = response.headers().firstValue(APP_USAGE_HEADER).orElse(null),
+      adsInsights = response.headers().firstValue(ADS_INSIGHTS_THROTTLE_HEADER).orElse(null),
     )
 
   /**
@@ -412,11 +413,16 @@ class MetaMarketingApiInsightsClient(
   }
 
   /** Response headers Meta uses to report quota consumption. Logged so throttling is visible. */
-  private data class ThrottleHeaders(val businessUseCase: String?, val appUsage: String?) {
-    fun isEmpty(): Boolean = businessUseCase == null && appUsage == null
+  private data class ThrottleHeaders(
+    val businessUseCase: String?,
+    val appUsage: String?,
+    val adsInsights: String?,
+  ) {
+    fun isEmpty(): Boolean = businessUseCase == null && appUsage == null && adsInsights == null
 
     override fun toString(): String =
-      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase $APP_USAGE_HEADER=$appUsage"
+      "$BUSINESS_USE_CASE_USAGE_HEADER=$businessUseCase $APP_USAGE_HEADER=$appUsage " +
+        "$ADS_INSIGHTS_THROTTLE_HEADER=$adsInsights"
   }
 
   companion object {
@@ -461,6 +467,9 @@ class MetaMarketingApiInsightsClient(
     // being rejected.
     private const val BUSINESS_USE_CASE_USAGE_HEADER = "x-business-use-case-usage"
     private const val APP_USAGE_HEADER = "x-app-usage"
+    // Insights-specific throttling, reported separately from the Business Use Case and app-level
+    // counters, so a query can be throttled on this alone while the other two look healthy.
+    private const val ADS_INSIGHTS_THROTTLE_HEADER = "x-fb-ads-insights-throttle"
 
     // Successful responses are sampled rather than logged individually: at report-creation volume
     // one line per Graph call would be unusable, but quota climbs silently without any.
