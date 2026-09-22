@@ -17,6 +17,7 @@
 package org.wfanet.measurement.edpcomponents.meta
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.google.protobuf.timestamp
 import com.google.type.interval
 import com.sun.net.httpserver.HttpExchange
@@ -227,19 +228,22 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
-  fun `throws MetaIntervalNotSupportedException when the interval is not day-aligned in account TZ`() {
-    insightsResponses = listOf(200 to """{"data":[]}""") // should never be reached
+  fun `moves a sub-hour bound to the nearest bucket edge rather than rejecting it`() {
+    // 2026-06-30T15:30Z is 00:30 in Tokyo. It is nearer 00:00 than 01:00, so the interval starts at
+    // Tokyo midnight and the whole first day is queried daily rather than split by hour.
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"42"}]}""")
 
-    // 2026-06-30T15:30Z is 00:30 in Tokyo — not a midnight boundary.
-    val unaligned = interval {
-      startTime = timestamp { seconds = Instant.parse("2026-06-30T15:30:00Z").epochSecond }
-      endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
-    }
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-06-30T15:30:00Z", "2026-07-02T15:00:00Z"),
+          UNFILTERED,
+        )
 
-    assertFailsWith<MetaIntervalNotSupportedException> {
-      client().queryImpressions(listOf(campaignTarget()), unaligned, UNFILTERED)
-    }
-    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+    assertThat(count).isEqualTo(42L)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-07-01","until":"2026-07-02"}""")
   }
 
   @Test
@@ -664,6 +668,403 @@ class MetaMarketingApiInsightsClientTest {
     endTime = timestamp { seconds = Instant.parse("2026-07-02T15:00:00Z").epochSecond }
   }
 
+  private fun intervalOf(start: String, end: String) = interval {
+    startTime = timestamp { seconds = Instant.parse(start).epochSecond }
+    endTime = timestamp { seconds = Instant.parse(end).epochSecond }
+  }
+
+  /** Every `/insights` query issued, decoded, in request order. */
+  private fun insightsQueries(): List<String> =
+    requestUris
+      .filter { it.path.endsWith("/insights") }
+      .map { URLDecoder.decode(it.rawQuery, StandardCharsets.UTF_8) }
+
+  private fun hourlyRow(hour: Int, impressions: Long): String =
+    """{"impressions":"$impressions","hourly_stats_aggregated_by_advertiser_time_zone":""" +
+      """"%02d:00:00 - %02d:59:59"}""".format(hour, hour)
+
+  private fun hourlyPage(vararg hours: Pair<Int, Long>): String =
+    """{"data":[${hours.joinToString(",") { hourlyRow(it.first, it.second) }}]}"""
+
+  @Test
+  fun `reconstructs an interval whose both bounds are mid-day in the ad account timezone`() {
+    // Asia/Tokyo is UTC+9, so a UTC-midnight interval starts and ends at 09:00 local. The exact
+    // count is hours 9-23 of the first local day, every whole day between, and hours 0-8 of the
+    // last. Buckets outside those hours must not be counted.
+    insightsResponses =
+      listOf(
+        200 to hourlyPage(8 to 5L, 9 to 10L, 23 to 20L),
+        200 to """{"data":[{"impressions":"1000"}]}""",
+        200 to hourlyPage(0 to 7L, 8 to 3L, 9 to 50L),
+      )
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+          UNFILTERED,
+        )
+
+    // 10 + 20 in hours 9-23 of the first day, 1000 for the whole days, 7 + 3 in hours 0-8 of the
+    // last. Buckets 8 on the first day and 9 on the last fall outside and must not be counted.
+    assertThat(count).isEqualTo(1040L)
+    val queries = insightsQueries()
+    assertThat(queries).hasSize(3)
+    assertThat(queries[0]).contains("""time_range={"since":"2026-07-01","until":"2026-07-01"}""")
+    assertThat(queries[0]).contains("breakdowns=hourly_stats_aggregated_by_advertiser_time_zone")
+    assertThat(queries[1]).contains("""time_range={"since":"2026-07-02","until":"2026-07-07"}""")
+    assertThat(queries[1]).contains("breakdowns=age,gender")
+    assertThat(queries[2]).contains("""time_range={"since":"2026-07-08","until":"2026-07-08"}""")
+    assertThat(queries[2]).contains("breakdowns=hourly_stats_aggregated_by_advertiser_time_zone")
+  }
+
+  @Test
+  fun `reconstructs an interval with only a trailing partial day`() {
+    // Starts at Tokyo midnight, ends at 12:00 Tokyo: whole days then one hourly boundary, no
+    // leading hourly query.
+    insightsResponses =
+      listOf(200 to """{"data":[{"impressions":"400"}]}""", 200 to hourlyPage(0 to 9L, 12 to 99L))
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-06-30T15:00:00Z", "2026-07-03T03:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Bucket 12 starts exactly at the exclusive end, so it is outside the interval.
+    assertThat(count).isEqualTo(409L)
+    val queries = insightsQueries()
+    assertThat(queries).hasSize(2)
+    assertThat(queries[0]).contains("""time_range={"since":"2026-07-01","until":"2026-07-02"}""")
+    assertThat(queries[1]).contains("""time_range={"since":"2026-07-03","until":"2026-07-03"}""")
+  }
+
+  @Test
+  fun `queries one hourly day when both bounds fall inside the same local day`() {
+    // Regression: treating this as both a leading and a trailing partial day would double-count it.
+    insightsResponses = listOf(200 to hourlyPage(5 to 100L, 6 to 11L, 11 to 22L, 12 to 100L))
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-06-30T21:00:00Z", "2026-07-01T03:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(33L)
+    assertThat(insightsQueries()).hasSize(1)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-07-01","until":"2026-07-01"}""")
+  }
+
+  @Test
+  fun `treats hours Meta omits as zero delivery`() {
+    // Meta returns no row for an hour with no delivery. Only bucket 23 is in the interval.
+    insightsResponses =
+      listOf(200 to hourlyPage(23 to 12L), 200 to """{"data":[]}""", 200 to """{"data":[]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(12L)
+  }
+
+  @Test
+  fun `follows paging on an hourly boundary query`() {
+    val nextUri =
+      "http://127.0.0.1:${server.address.port}/$API_VERSION/111/insights?after=HOURS&access_token=$ACCESS_TOKEN"
+    insightsResponses =
+      listOf(
+        200 to """{"data":[${hourlyRow(9, 4L)}],"paging":{"next":"$nextUri"}}""",
+        200 to hourlyPage(10 to 6L),
+        200 to """{"data":[{"impressions":"0"}]}""",
+        200 to """{"data":[]}""",
+      )
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(10L)
+    val paged =
+      requestUris.single {
+        it.path.endsWith("/insights") && (it.rawQuery ?: "").contains("after=HOURS")
+      }
+    assertThat(paged.rawQuery).contains("appsecret_proof=")
+  }
+
+  @Test
+  fun `stays exact when a fall-back repeated hour is wholly excluded`() {
+    // America/New_York ends DST on 2026-11-01, so local 01:00-01:59 happens twice and shares one
+    // bucket. Starting at 13:00 local leaves both occurrences outside the interval, so hours 13-23
+    // are reconstructable with no adjustment at all.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(1 to 900L, 13 to 8L, 23 to 2L), 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T18:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(10L)
+    assertThat(insightsQueries()[0])
+      .contains("""time_range={"since":"2026-11-01","until":"2026-11-01"}""")
+  }
+
+  @Test
+  fun `stays exact when a fall-back repeated hour is wholly included`() {
+    // Starting at 00:00 local puts both occurrences of the repeated hour inside the interval, so
+    // the whole bucket belongs to it and the count is exact.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"250"}]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T04:00:00Z", "2026-11-03T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(250L)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-11-01","until":"2026-11-02"}""")
+  }
+
+  @Test
+  fun `resolves a bound inside the fall-back repeated hour to the earlier edge of its bucket`() {
+    // 2026-11-01T06:00Z is the *second* 01:00 local; 05:00Z is the first. Meta shares one bucket
+    // between them, so a bound at either takes the whole bucket or none of it — never half. The
+    // plan keys off local hour, which is 1 for both, so the bound resolves to the earlier of the
+    // two equidistant edges and the bucket is wholly included.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(0 to 500L, 1 to 30L, 2 to 6L), 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T06:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 0 precedes the snapped start and is excluded; hour 1 is now wholly inside.
+    assertThat(count).isEqualTo(36L)
+  }
+
+  @Test
+  fun `treats the second fall-back occurrence as mid-bucket, not a bucket edge`() {
+    // Regression: both occurrences of 01:00 look like whole hours locally, so an interval running
+    // from the first to the second used to pass through unsnapped and produce the empty hour range
+    // `1 until 1` — a silent zero. The two occurrences share one Meta bucket, so the second sits
+    // mid-bucket; it resolves back to the first, leaving an empty interval that is rejected.
+    timezoneBody = NEW_YORK_TIMEZONE
+
+    val failure =
+      assertFailsWith<MetaIntervalNotSupportedException> {
+        client()
+          .queryImpressions(
+            listOf(campaignTarget()),
+            intervalOf("2026-11-01T05:00:00Z", "2026-11-01T06:00:00Z"),
+            UNFILTERED,
+          )
+      }
+
+    assertThat(failure).hasMessageThat().contains("empty")
+    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+  }
+
+  @Test
+  fun `counts the whole shared bucket from the first fall-back occurrence`() {
+    // The mirror: starting at the *first* 01:00 is a genuine bucket edge, so nothing is adjusted
+    // and the shared bucket — both real hours of it — is counted once.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(0 to 700L, 1 to 40L, 2 to 5L), 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T05:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 0 precedes the start and is excluded; hours 1 and 2 are inside.
+    assertThat(count).isEqualTo(45L)
+  }
+
+  @Test
+  fun `reconstructs across a spring-forward boundary day`() {
+    // The mirror of the fall-back case: on 2026-03-08 the local day is 23 hours, but every bucket
+    // still maps to at most one real hour, so the mapping stays exact. The hour that does not exist
+    // simply returns no row.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(1 to 3L, 3 to 4L), 200 to """{"data":[]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-03-08T06:00:00Z", "2026-03-10T04:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(7L)
+  }
+
+  @Test
+  fun `keeps a whole daylight-saving day in the daily query`() {
+    // The fall-back day is only a problem when it has to be split by hour. Wholly inside the
+    // interval it is covered by the daily aggregate, which already includes the repeated hour.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to """{"data":[{"impressions":"77"}]}""")
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-10-31T04:00:00Z", "2026-11-03T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    assertThat(count).isEqualTo(77L)
+    assertThat(insightsQueries()).hasSize(1)
+    assertThat(insightsQueries().single())
+      .contains("""time_range={"since":"2026-10-31","until":"2026-11-02"}""")
+  }
+
+  @Test
+  fun `moves a half-hour-offset bound to the nearest bucket edge`() {
+    // Asia/Kolkata is UTC+5:30, so a UTC-midnight bound lands exactly halfway through a bucket.
+    // Both edges are thirty minutes away, so the tie resolves earlier: 05:30 local becomes 05:00.
+    timezoneBody = KOLKATA_TIMEZONE
+    insightsResponses =
+      listOf(200 to hourlyPage(4 to 900L, 5 to 11L, 23 to 4L), 200 to EMPTY_PAGE, 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 5 is inside the effective interval; hour 4 precedes it and is excluded.
+    assertThat(count).isEqualTo(15L)
+    assertThat(insightsQueries()[0])
+      .contains("""time_range={"since":"2026-07-01","until":"2026-07-01"}""")
+  }
+
+  @Test
+  fun `skips an interval that both bounds collapse onto the same bucket edge`() {
+    // A span shorter than one bucket, wholly inside its second half: on Asia/Kolkata these bounds
+    // are 05:40 and 05:50 local, and both are nearer 06:00 than 05:00, so both resolve to the same
+    // edge and the effective interval is empty. Nothing is queried.
+    timezoneBody = KOLKATA_TIMEZONE
+
+    val failure =
+      assertFailsWith<MetaIntervalNotSupportedException> {
+        client()
+          .queryImpressions(
+            listOf(campaignTarget()),
+            // 05:40 and 05:50 local; both are nearer 06:00, so the effective interval is empty.
+            intervalOf("2026-07-01T00:10:00Z", "2026-07-01T00:20:00Z"),
+            UNFILTERED,
+          )
+      }
+
+    assertThat(failure).hasMessageThat().contains("empty")
+    assertThat(failure).hasMessageThat().contains("effective")
+    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+  }
+
+  @Test
+  fun `skips a misaligned interval that also carries a demographic filter`() {
+    // Meta rejects the hourly breakdown combined with age or gender, so a filtered boundary day
+    // cannot be answered. Comparing a filtered reported count against an unfiltered publisher count
+    // would be a false deviation, so this skips instead.
+    val filter = MetaDemographicFilter(genders = setOf(MetaGender.FEMALE))
+
+    val failure =
+      assertFailsWith<MetaIntervalNotSupportedException> {
+        client()
+          .queryImpressions(
+            listOf(campaignTarget()),
+            intervalOf("2026-07-01T00:00:00Z", "2026-07-08T00:00:00Z"),
+            filter,
+          )
+      }
+
+    assertThat(failure).hasMessageThat().contains("age or gender")
+  }
+
+  @Test
+  fun `still answers a day-aligned filtered interval with one daily query`() {
+    // The demographic path is unaffected when no boundary day needs splitting.
+    insightsResponses =
+      listOf(
+        200 to
+          """{"data":[
+            {"impressions":"60","age":"25-34","gender":"female"},
+            {"impressions":"40","age":"25-34","gender":"male"}
+          ]}"""
+      )
+    val filter = MetaDemographicFilter(genders = setOf(MetaGender.FEMALE))
+
+    val count = client().queryImpressions(listOf(campaignTarget()), alignedInterval(), filter)
+
+    assertThat(count).isEqualTo(60L)
+    assertThat(insightsQueries().single()).contains("breakdowns=age,gender")
+  }
+
+  @Test
+  fun `raises on an unrecognized hourly bucket label`() {
+    // A bucket this client cannot place is not zero delivery — counting it as such would silently
+    // undercount the interval.
+    // The first is rejected by any parser. The rest are the cases the old integer-prefix parser
+    // accepted: a start that is not the top of the hour, an end hour that does not match the start,
+    // and a label with no second endpoint at all.
+    val badLabels = listOf("midday", "09:30:00 - 09:59:59", "09:00:00 - 10:59:59", "09:00:00")
+    for (label in badLabels) {
+      requestUris.clear()
+      insightsIndex = 0
+      insightsResponses =
+        listOf(
+          200 to
+            """{"data":[{"impressions":"5",""" +
+              """"hourly_stats_aggregated_by_advertiser_time_zone":"$label"}]}"""
+        )
+
+      val failure =
+        assertFailsWith<MetaApiException> {
+          client()
+            .queryImpressions(
+              listOf(campaignTarget()),
+              intervalOf("2026-06-30T21:00:00Z", "2026-07-01T03:00:00Z"),
+              UNFILTERED,
+            )
+        }
+
+      assertWithMessage("label %s", label).that(failure).hasMessageThat().contains(label)
+    }
+  }
+
   companion object {
     private const val ACCESS_TOKEN = "test-token"
     private const val APP_SECRET = "test-secret"
@@ -671,6 +1072,10 @@ class MetaMarketingApiInsightsClientTest {
     private val UNFILTERED = MetaDemographicFilter.UNFILTERED
 
     // Small enough that the sampling test can reach three entries in a handful of queries.
+    private const val KOLKATA_TIMEZONE = """{"timezone_name":"Asia/Kolkata","id":"act_999"}"""
+    private const val NEW_YORK_TIMEZONE = """{"timezone_name":"America/New_York","id":"act_999"}"""
+    private const val EMPTY_PAGE = """{"data":[]}"""
+
     private const val SAMPLE_INTERVAL = 3L
     private const val QUERY_COUNT = 7
   }

@@ -32,10 +32,15 @@ interface MetaInsightsClient {
    * Returns the total Meta impression count across [targets] over [timeInterval], restricted to the
    * demographic buckets in [demographics].
    *
+   * [timeInterval] need not be day-aligned in the ad account's timezone. A bound on a Meta bucket
+   * boundary there is answered exactly. The one bound that is not on a boundary — one inside an
+   * hour a daylight-saving fall-back repeats, which Meta reports as a single bucket — resolves to
+   * the earlier edge of that bucket, so the count can cover up to an hour more than requested.
+   *
    * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.
-   * @throws MetaIntervalNotSupportedException if [timeInterval] cannot be expressed as a Meta
-   *   day-granular `time_range` (not midnight-aligned in the ad account's timezone).
+   * @throws MetaIntervalNotSupportedException if [timeInterval] is empty, as requested or once its
+   *   bounds are moved to bucket edges.
    */
   fun queryImpressions(
     targets: List<MetaInsightsTarget>,
@@ -60,6 +65,10 @@ data class MetaDemographicFilter(
   val ages: Set<MetaAgeBracket> = emptySet(),
   val genders: Set<MetaGender> = emptySet(),
 ) {
+  /** Whether this restricts neither dimension, and so needs no demographic breakdown. */
+  val isUnfiltered: Boolean
+    get() = ages.isEmpty() && genders.isEmpty()
+
   companion object {
     /** No demographic restriction — total impressions for the campaigns over the interval. */
     val UNFILTERED = MetaDemographicFilter()
@@ -121,8 +130,16 @@ class MetaAuthException(message: String, cause: Throwable? = null) :
   MetaApiException(message, cause)
 
 /**
- * The requested time interval cannot be expressed as a Meta day-granular `time_range` — i.e. it is
- * not aligned to midnight boundaries in the ad account's timezone. Meta Insights only supports
- * whole days in the account's timezone, so sub-day or unaligned intervals cannot be answered.
+ * The requested time interval cannot be answered in Meta's buckets.
+ *
+ * Meta Insights measures whole days in the ad account's timezone, and whole hours within one such
+ * day. An interval that is not day-aligned there is answered by combining the interior whole days
+ * with the hourly buckets of each partial boundary day, and a bound that is not on a bucket edge is
+ * moved to the nearest one. This is raised only when even that leaves nothing to query:
+ * - An interval that is empty, either as requested or once its bounds are moved. A span shorter
+ *   than one bucket can collapse this way — on a zone at a half-hour offset, for example, both
+ *   bounds of a twenty-minute interval can resolve to the same edge.
+ * - An interval needing hourly boundary queries together with a demographic filter, which Meta does
+ *   not allow in one query.
  */
 class MetaIntervalNotSupportedException(message: String) : Exception(message)

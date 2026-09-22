@@ -27,8 +27,8 @@ Bazel registry).
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
    `FILTER_NOT_SUPPORTED`. Age/gender breakdown translation is tracked as a TODO (see Status).
 4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, split the interval into the
-   queries that cover it (one daily for the interior whole days, one hourly per partial boundary
-   day), query Graph API Insights, follow paging, sum matching buckets.
+   Insights queries that cover it exactly (one daily query for the interior whole days, one hourly
+   query per partial boundary day), query Graph API Insights, follow paging, sum matching buckets.
 5. Return the count, or a skip reason.
 
 ## Auth
@@ -42,14 +42,20 @@ Bazel registry).
 tagged `manual`, so `bazel test //...` never picks it up, and it self-skips when its environment
 variables are unset.
 
-**The interval need not be day-aligned in the ad account's timezone.** The client covers the
-interior whole days with one query and each partial boundary day with an hourly one, so a
-UTC-midnight window on a non-UTC account is answered rather than rejected.
+**The interval need not be day-aligned in the ad account's own timezone.** Meta answers whole days,
+and whole hours within one day, in that timezone, so an interval is covered by querying the interior
+whole days plus the hourly buckets of each partial boundary day. A UTC-midnight window on a non-UTC
+account works.
 
-A bound that is not on a Meta bucket edge in that zone moves to the nearest one, ties resolving
-earlier, and the run logs the requested and effective intervals. **For a run whose count you intend
-to assert exactly, choose bounds already on bucket edges** — whole hours in the account's zone,
-avoiding the hour a daylight-saving fall-back repeats. Look the account timezone up first:
+**The count is exact for the *effective* interval, which is not always the one requested.** Meta
+cannot split a bucket, so a bound that does not land on a bucket edge moves to the nearest one, ties
+resolving earlier, and the run logs both intervals. Two things put a bound off an edge: a zone at a
+half-hour offset (`Asia/Kolkata` puts a UTC bound mid-bucket every time), and a bound inside the
+hour a daylight-saving fall-back repeats, which Meta reports as one bucket covering both
+occurrences. Only an interval left empty by that adjustment is rejected.
+
+For a run whose count you intend to assert exactly, pick bounds already on bucket edges — whole
+hours in the account's zone, away from a fall-back. Look the timezone up first:
 
 ```bash
 PROOF=$(printf '%s' "$META_ACCESS_TOKEN" | openssl dgst -sha256 -hmac "$META_APP_SECRET" | sed 's/^.*= *//')
@@ -138,7 +144,9 @@ every request, and skip-reason mapping.
 
 Open TODOs (tracked in code):
 - **CEL → breakdown** translation for `age_group` + `gender` — only the unfiltered case is supported
-  today; filtered queries return `FILTER_NOT_SUPPORTED`.
+  today; filtered queries return `FILTER_NOT_SUPPORTED`. Meta does not allow the hourly breakdown
+  alongside `age` or `gender`, so a filtered interval needing hourly boundary queries cannot be
+  answered at all (world-federation-of-advertisers/edp-components#16).
 - **Async Insights** report-run path for large queries.
 - **Gen-2 deploy target** — `java_binary` + container image.
 - **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.
