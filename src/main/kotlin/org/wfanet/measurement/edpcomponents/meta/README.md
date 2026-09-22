@@ -26,9 +26,9 @@ Bazel registry).
    `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
    `FILTER_NOT_SUPPORTED`. Age/gender breakdown translation is tracked as a TODO (see Status).
-4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, build the day-granular
-   `time_range`, query Graph API Insights (`breakdowns=age,gender`), follow paging, sum matching
-   buckets.
+4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, split the interval into the
+   queries that cover it (one daily for the interior whole days, one hourly per partial boundary
+   day), query Graph API Insights, follow paging, sum matching buckets.
 5. Return the count, or a skip reason.
 
 ## Auth
@@ -42,11 +42,14 @@ Bazel registry).
 tagged `manual`, so `bazel test //...` never picks it up, and it self-skips when its environment
 variables are unset.
 
-**The interval must be whole days in the ad account's own timezone.** Meta answers only
-account-midnight-aligned day ranges, so a UTC-midnight window on a non-UTC account is rejected
-before any request is sent (see
-[#4](https://github.com/world-federation-of-advertisers/edp-components/issues/4)). Look the account
-timezone up first:
+**The interval need not be day-aligned in the ad account's timezone.** The client covers the
+interior whole days with one query and each partial boundary day with an hourly one, so a
+UTC-midnight window on a non-UTC account is answered rather than rejected.
+
+A bound that is not on a Meta bucket edge in that zone moves to the nearest one, ties resolving
+earlier, and the run logs the requested and effective intervals. **For a run whose count you intend
+to assert exactly, choose bounds already on bucket edges** — whole hours in the account's zone,
+avoiding the hour a daylight-saving fall-back repeats. Look the account timezone up first:
 
 ```bash
 PROOF=$(printf '%s' "$META_ACCESS_TOKEN" | openssl dgst -sha256 -hmac "$META_APP_SECRET" | sed 's/^.*= *//')
@@ -83,8 +86,8 @@ PY
 | `META_APP_SECRET` | yes | App secret, for `appsecret_proof` |
 | `META_TEST_ENTITY_ID` | yes | Campaign / ad / ad set / account ID |
 | `META_TEST_ENTITY_TYPE` | no | Defaults to `campaign` |
-| `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — local midnight in the account's zone |
-| `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — local midnight |
+| `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — a whole hour in the account's zone |
+| `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — a whole hour |
 | `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
 
 It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
@@ -107,8 +110,8 @@ fails when one is missing.
 | --- | --- | --- |
 | `entity_id` | string | Campaign / ad / ad set / account ID |
 | `entity_type` | string | One of `campaign`, `ad`, `creative`, `ad_set`, `adset`, `account`, `ad_account` |
-| `start_epoch_seconds` | integer | Interval start — local midnight in the account's timezone |
-| `end_epoch_seconds` | integer | Interval end, exclusive — local midnight, after the start |
+| `start_epoch_seconds` | integer | Interval start — a whole hour in the account's timezone |
+| `end_epoch_seconds` | integer | Interval end, exclusive — a whole hour, after the start |
 | `expected_impressions` | integer | The count the query must return exactly |
 
 Locally:
