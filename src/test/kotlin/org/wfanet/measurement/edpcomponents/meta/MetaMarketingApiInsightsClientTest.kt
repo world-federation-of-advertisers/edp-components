@@ -817,6 +817,47 @@ class MetaMarketingApiInsightsClientTest {
   }
 
   @Test
+  fun `treats the second fall-back occurrence as mid-bucket, not a bucket edge`() {
+    // Regression: both occurrences of 01:00 look like whole hours locally, so an interval running
+    // from the first to the second used to pass through unsnapped and produce the empty hour range
+    // `1 until 1` — a silent zero. The two occurrences share one Meta bucket, so the second sits
+    // mid-bucket; it resolves back to the first, leaving an empty interval that is rejected.
+    timezoneBody = NEW_YORK_TIMEZONE
+
+    val failure =
+      assertFailsWith<MetaIntervalNotSupportedException> {
+        client()
+          .queryImpressions(
+            listOf(campaignTarget()),
+            intervalOf("2026-11-01T05:00:00Z", "2026-11-01T06:00:00Z"),
+            UNFILTERED,
+          )
+      }
+
+    assertThat(failure).hasMessageThat().contains("empty")
+    assertThat(requestUris.any { it.path.endsWith("/insights") }).isFalse()
+  }
+
+  @Test
+  fun `counts the whole shared bucket from the first fall-back occurrence`() {
+    // The mirror: starting at the *first* 01:00 is a genuine bucket edge, so nothing is adjusted
+    // and the shared bucket — both real hours of it — is counted once.
+    timezoneBody = NEW_YORK_TIMEZONE
+    insightsResponses = listOf(200 to hourlyPage(0 to 700L, 1 to 40L, 2 to 5L), 200 to EMPTY_PAGE)
+
+    val count =
+      client()
+        .queryImpressions(
+          listOf(campaignTarget()),
+          intervalOf("2026-11-01T05:00:00Z", "2026-11-05T05:00:00Z"),
+          UNFILTERED,
+        )
+
+    // Hour 0 precedes the start and is excluded; hours 1 and 2 are inside.
+    assertThat(count).isEqualTo(45L)
+  }
+
+  @Test
   fun `reconstructs across a spring-forward boundary day`() {
     // The mirror of the fall-back case: on 2026-03-08 the local day is 23 hours, but every bucket
     // still maps to at most one real hour, so the mapping stays exact. The hour that does not exist

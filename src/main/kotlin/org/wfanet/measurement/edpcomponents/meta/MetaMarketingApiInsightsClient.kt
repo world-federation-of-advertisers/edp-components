@@ -29,11 +29,11 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeParseException
-import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.logging.Logger
@@ -55,9 +55,15 @@ import javax.crypto.spec.SecretKeySpec
  * extra Graph call, cached per account) and covers the interval exactly with the queries
  * [planQuery] produces: one daily query for the interior whole days, plus an hourly query for each
  * partial boundary day counting only the in-interval buckets. A day-aligned interval is still a
- * single daily query. A bound that is not on a bucket edge moves to the nearest one, logged as a
- * requested-versus-effective interval; only an interval left empty by that raises
- * [MetaIntervalNotSupportedException]. See [planQuery] and [MetaIntervalNotSupportedException].
+ * single daily query.
+ *
+ * **The answer is exact for the effective interval, which is not always the requested one.** Meta's
+ * smallest unit is one bucket and it cannot be split, so a bound that does not land on a bucket
+ * edge moves to the nearest one, ties resolving earlier. The count then covers up to an hour more
+ * or less than asked for, and both intervals are logged whenever they differ. A bound is off a
+ * bucket edge when the account's zone is at a half-hour offset, or when it falls inside the hour a
+ * daylight-saving fall-back repeats. Only an interval left empty by that adjustment raises
+ * [MetaIntervalNotSupportedException].
  *
  * Auth: [accessToken] is a Meta System User token and [appSecret] is the Meta app secret, both
  * loaded from Secret Manager by the caller — they never leave this environment. Every request
@@ -309,8 +315,15 @@ class MetaMarketingApiInsightsClient(
     QuerySegment(date, date, fromHour until toHourExclusive)
 
   /**
-   * Moves [time] to the nearest Meta bucket edge — a whole hour in its own zone — breaking a tie
-   * toward the earlier edge.
+   * Moves [time] to the nearer edge of the Meta bucket containing it, breaking a tie toward the
+   * earlier edge.
+   *
+   * A bucket is one local hour of one local day, and its edges are real instants rather than local
+   * wall-clock times. That distinction matters during a daylight-saving fall-back: the repeated
+   * local hour is two real hours but one Meta bucket, so the second occurrence of `01:00` sits in
+   * the *middle* of the bucket, not on its edge. Treating it as an edge lets an interval between
+   * the two occurrences produce an empty hour range and a count of zero, when the honest answer is
+   * that the interval cannot be measured.
    *
    * A zone at a half-hour offset (for example `Asia/Kolkata`) puts a UTC-aligned bound exactly
    * halfway through a bucket, so every such bound ties and resolves earlier. Meta cannot split a
@@ -320,12 +333,25 @@ class MetaMarketingApiInsightsClient(
    * rejects an interval this leaves empty.
    */
   private fun snapToBucketEdge(time: ZonedDateTime): ZonedDateTime {
-    val earlier: ZonedDateTime = time.truncatedTo(ChronoUnit.HOURS)
-    if (earlier == time) return time
-    val later: ZonedDateTime = earlier.plusHours(1)
-    val toEarlier = Duration.between(earlier, time)
-    val toLater = Duration.between(time, later)
-    return if (toEarlier <= toLater) earlier else later
+    val start: ZonedDateTime = bucketStart(time.toLocalDate(), time.hour, time.zone)
+    if (start == time) return time
+    val end: ZonedDateTime = bucketStart(time.toLocalDate(), time.hour + 1, time.zone)
+    return if (Duration.between(start, time) <= Duration.between(time, end)) start else end
+  }
+
+  /**
+   * First instant of the Meta bucket for [hour] of [date] in [zone], where [hour] may be 24 to mean
+   * the following midnight.
+   *
+   * `withEarlierOffsetAtOverlap` is what makes this the bucket's true start: for the repeated hour
+   * of a fall-back it selects the first of the two occurrences, so the whole shared bucket lies at
+   * or after the returned instant.
+   */
+  private fun bucketStart(date: LocalDate, hour: Int, zone: ZoneId): ZonedDateTime {
+    val local: LocalDateTime =
+      if (hour >= HOURS_PER_DAY) date.plusDays(1).atStartOfDay()
+      else date.atTime(LocalTime.of(hour, 0))
+    return local.atZone(zone).withEarlierOffsetAtOverlap()
   }
 
   /**

@@ -42,15 +42,20 @@ Bazel registry).
 tagged `manual`, so `bazel test //...` never picks it up, and it self-skips when its environment
 variables are unset.
 
-**The interval must fall on whole hours in the ad account's own timezone.** Meta answers whole days,
-and whole hours within one day, in that timezone. An interval that is not day-aligned there is
-covered exactly by querying the interior whole days plus the hourly buckets of each partial boundary
-day, so a UTC-midnight window on a non-UTC account works. Two cases still cannot be reconstructed
-and are rejected before any request is sent: a bound that is not a whole hour locally (a half-hour
-offset zone such as `Asia/Kolkata` puts a UTC bound mid-bucket), and a partial boundary day that
-repeats an hour for a daylight-saving fall-back.
+**The interval need not be day-aligned in the ad account's own timezone.** Meta answers whole days,
+and whole hours within one day, in that timezone, so an interval is covered by querying the interior
+whole days plus the hourly buckets of each partial boundary day. A UTC-midnight window on a non-UTC
+account works.
 
-Look the account timezone up to work out which case you are in:
+**The count is exact for the *effective* interval, which is not always the one requested.** Meta
+cannot split a bucket, so a bound that does not land on a bucket edge moves to the nearest one, ties
+resolving earlier, and the run logs both intervals. Two things put a bound off an edge: a zone at a
+half-hour offset (`Asia/Kolkata` puts a UTC bound mid-bucket every time), and a bound inside the
+hour a daylight-saving fall-back repeats, which Meta reports as one bucket covering both
+occurrences. Only an interval left empty by that adjustment is rejected.
+
+For a run whose count you intend to assert exactly, pick bounds already on bucket edges — whole
+hours in the account's zone, away from a fall-back. Look the timezone up first:
 
 ```bash
 PROOF=$(printf '%s' "$META_ACCESS_TOKEN" | openssl dgst -sha256 -hmac "$META_APP_SECRET" | sed 's/^.*= *//')
@@ -87,8 +92,8 @@ PY
 | `META_APP_SECRET` | yes | App secret, for `appsecret_proof` |
 | `META_TEST_ENTITY_ID` | yes | Campaign / ad / ad set / account ID |
 | `META_TEST_ENTITY_TYPE` | no | Defaults to `campaign` |
-| `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — local midnight in the account's zone |
-| `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — local midnight |
+| `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — a whole hour in the account's zone |
+| `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — a whole hour |
 | `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
 
 It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
@@ -111,8 +116,8 @@ fails when one is missing.
 | --- | --- | --- |
 | `entity_id` | string | Campaign / ad / ad set / account ID |
 | `entity_type` | string | One of `campaign`, `ad`, `creative`, `ad_set`, `adset`, `account`, `ad_account` |
-| `start_epoch_seconds` | integer | Interval start — local midnight in the account's timezone |
-| `end_epoch_seconds` | integer | Interval end, exclusive — local midnight, after the start |
+| `start_epoch_seconds` | integer | Interval start — a whole hour in the account's timezone |
+| `end_epoch_seconds` | integer | Interval end, exclusive — a whole hour, after the start |
 | `expected_impressions` | integer | The count the query must return exactly |
 
 Locally:
@@ -139,7 +144,9 @@ every request, and skip-reason mapping.
 
 Open TODOs (tracked in code):
 - **CEL → breakdown** translation for `age_group` + `gender` — only the unfiltered case is supported
-  today; filtered queries return `FILTER_NOT_SUPPORTED`.
+  today; filtered queries return `FILTER_NOT_SUPPORTED`. Meta does not allow the hourly breakdown
+  alongside `age` or `gender`, so a filtered interval needing hourly boundary queries cannot be
+  answered at all (world-federation-of-advertisers/edp-components#16).
 - **Async Insights** report-run path for large queries.
 - **Gen-2 deploy target** — `java_binary` + container image.
 - **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.
