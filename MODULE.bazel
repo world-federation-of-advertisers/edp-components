@@ -4,10 +4,10 @@ module(
 )
 
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "protobuf", version = "33.1")
+bazel_dep(name = "protobuf", version = "33.6")
 bazel_dep(name = "rules_java", version = "8.15.2")
 bazel_dep(name = "rules_jvm_external", version = "6.8")
-bazel_dep(name = "rules_kotlin_jvm", version = "0.13.0", repo_name = "wfa_rules_kotlin_jvm")
+bazel_dep(name = "rules_kotlin_jvm", version = "0.15.0", repo_name = "wfa_rules_kotlin_jvm")
 bazel_dep(name = "common-jvm", version = "0.144.0", repo_name = "wfa_common_jvm")
 bazel_dep(
     name = "cross-media-measurement-api",
