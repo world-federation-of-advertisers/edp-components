@@ -1,6 +1,17 @@
 load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_test")
 
 kt_jvm_test(
+    name = "CommonTestingMavenTest",
+    srcs = ["CommonTestingMavenTest.kt"],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.CommonTestingMavenTest",
+    deps = [
+        "@maven//:com_google_truth_truth",
+        "@maven//:junit_junit",
+        "@maven//:org_wfanet_measurement_common_testing",
+    ],
+)
+
+kt_jvm_test(
     name = "MetaImpressionQueryFunctionTest",
     srcs = ["MetaImpressionQueryFunctionTest.kt"],
     test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionTest",

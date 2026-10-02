@@ -52,6 +52,17 @@ jobs:
       - name: Set up Bazel
         uses: world-federation-of-advertisers/actions/setup-bazel@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
 
+      - name: Repin Maven dependencies
+        env:
+          REPIN: "1"
+        run: bazel run @maven//:pin
+
+      - name: Upload Maven lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maven-lock
+          path: maven_install.json
+
       - name: Build
         run: bazel build //...
 
