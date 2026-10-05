@@ -73,15 +73,16 @@ curl -sG "https://graph.facebook.com/v25.0/act_<ACCOUNT_ID>" \
   --data-urlencode "appsecret_proof=$PROOF"
 ```
 
-Then convert local midnights to epoch seconds in that zone:
+Then convert the bounds to epoch seconds in that zone. Bounds that are whole hours but not
+midnight exercise the hourly boundary path as well as the daily one:
 
 ```bash
 python3 - <<'PY'
 from datetime import datetime
 from zoneinfo import ZoneInfo
 tz = ZoneInfo("America/New_York")   # from the call above
-start = datetime(2026, 5, 13, 0, 0, tzinfo=tz)
-end   = datetime(2026, 6,  1, 0, 0, tzinfo=tz)   # exclusive; Meta's `until` is inclusive
+start = datetime(2026, 5, 13, 15, 0, tzinfo=tz)
+end   = datetime(2026, 6,  1,  9, 0, tzinfo=tz)   # exclusive
 print(int(start.timestamp()), int(end.timestamp()))
 PY
 ```
@@ -106,8 +107,8 @@ fails when one is missing.
 {
   "entity_id": "<CAMPAIGN_ID>",
   "entity_type": "campaign",
-  "start_epoch_seconds": 1778644800,
-  "end_epoch_seconds": 1780286400,
+  "start_epoch_seconds": 1778698800,
+  "end_epoch_seconds": 1780318800,
   "expected_impressions": 1234
 }
 ```
