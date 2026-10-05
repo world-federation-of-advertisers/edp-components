@@ -88,7 +88,7 @@ PY
 | `META_TEST_ENTITY_TYPE` | no | Defaults to `campaign` |
 | `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — a whole hour in the account's zone |
 | `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — a whole hour |
-| `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
+| `META_TEST_EXPECTED_IMPRESSIONS` | yes | The count the query must return exactly |
 
 It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
 environment holding `META_ACCESS_TOKEN` and `META_APP_SECRET` as secrets, and the target as a
@@ -124,6 +124,7 @@ bazel test \
   --test_env=META_TEST_ENTITY_ID --test_env=META_TEST_ENTITY_TYPE \
   --test_env=META_TEST_START_EPOCH_SECONDS \
   --test_env=META_TEST_END_EPOCH_SECONDS \
+  --test_env=META_TEST_EXPECTED_IMPRESSIONS \
   --test_output=all
 ```
 
