@@ -22,9 +22,9 @@ kt_jvm_library(
     ],
     deps = [
         ":data_provider_impression_query_kt_jvm_proto",
-        "@wfa_common_jvm//imports/java/com/google/cloud/functions:functions_framework_api",
-        "@wfa_common_jvm//imports/java/com/google/gson",
-        "@wfa_common_jvm//imports/java/com/google/protobuf",
+        "@maven//:com_google_cloud_functions_functions_framework_api",
+        "@maven//:com_google_code_gson_gson",
+        "@maven//:com_google_protobuf_protobuf_java",
     ],
 )
 
