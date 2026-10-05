@@ -19,6 +19,7 @@ maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(
     artifacts = [
         "com.google.cloud.functions:functions-framework-api:1.1.0",
+        "com.google.cloud.functions.invoker:java-function-invoker:1.4.0",
         "com.google.code.gson:gson:2.12.1",
         "com.google.guava:guava:33.4.0-jre",
         "com.google.protobuf:protobuf-java:4.33.6",

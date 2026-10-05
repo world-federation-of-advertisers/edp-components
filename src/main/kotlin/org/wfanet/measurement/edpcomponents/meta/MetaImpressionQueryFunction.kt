@@ -173,6 +173,9 @@ class MetaImpressionQueryFunction(
      * ```
      *
      * https://cloud.google.com/functions/docs/configuring/secrets
+     *
+     * `META_GRAPH_API_BASE` optionally overrides the Graph API origin. Production leaves it unset;
+     * the function-boundary test points it at a fake Graph API.
      */
     private fun defaultInsightsClient(): MetaInsightsClient {
       val token =
@@ -185,7 +188,16 @@ class MetaImpressionQueryFunction(
           ?: error(
             "META_APP_SECRET not set (populated from Secret Manager at deploy via --set-secrets)"
           )
-      return MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
+      val graphApiBase = System.getenv("META_GRAPH_API_BASE")
+      return if (graphApiBase == null) {
+        MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
+      } else {
+        MetaMarketingApiInsightsClient(
+          accessToken = token,
+          appSecret = appSecret,
+          graphApiBase = graphApiBase,
+        )
+      }
     }
   }
 }
