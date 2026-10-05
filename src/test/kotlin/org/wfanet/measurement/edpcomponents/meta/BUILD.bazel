@@ -68,8 +68,8 @@ kt_jvm_test(
     test_class = "org.wfanet.measurement.edpcomponents.meta.MetaMarketingApiInsightsClientRealTest",
     deps = [
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
-        "@wfa_common_jvm//imports/java/com/google/common/truth",
-        "@wfa_common_jvm//imports/java/com/google/protobuf",
-        "@wfa_common_jvm//imports/java/org/junit",
+        "@maven//:com_google_protobuf_protobuf_java",
+        "@maven//:com_google_truth_truth",
+        "@maven//:junit_junit",
     ],
 )
