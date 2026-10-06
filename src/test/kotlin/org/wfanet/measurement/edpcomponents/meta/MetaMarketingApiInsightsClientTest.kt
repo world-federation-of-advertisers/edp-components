@@ -346,6 +346,19 @@ class MetaMarketingApiInsightsClientTest {
     assertThat(insightsQueryDecoded()).contains("level=campaign")
   }
 
+  @Test
+  fun `returns zero for a window with no delivery`() {
+    // Verified against live Meta: an entity that did not deliver in the window returns HTTP 200
+    // with an empty data array, no `paging` key and no `error` key. That is a real count of zero,
+    // not a failure, so it must not raise — the caller distinguishes the two, and treating it as
+    // an error would turn "this campaign didn't run" into a validation outage.
+    insightsResponses = listOf(200 to """{"data":[]}""")
+
+    val count = client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+
+    assertThat(count).isEqualTo(0L)
+  }
+
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")
 
   private fun alignedInterval() = interval {

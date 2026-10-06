@@ -71,6 +71,9 @@ data class MetaDemographicFilter(
  * so a supported CEL age filter maps to the set of brackets it covers.
  */
 enum class MetaAgeBracket(val apiValue: String) {
+  // Meta documents 13-17 as a valid age value. It only appears for inventory eligible to serve to
+  // minors, so a live run against an account whose ad sets all target 18+ will never produce it.
+  AGE_13_17("13-17"),
   AGE_18_24("18-24"),
   AGE_25_34("25-34"),
   AGE_35_44("35-44"),
