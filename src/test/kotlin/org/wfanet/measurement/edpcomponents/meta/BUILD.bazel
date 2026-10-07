@@ -75,14 +75,29 @@ kt_jvm_test(
     ],
 )
 
-# Functions Framework invoker serving MetaImpressionQueryFunction, for the function-boundary test.
+# Functions Framework invoker serving the deploy JAR, as Cloud Functions runs it.
 java_binary(
     name = "InvokeMetaImpressionQueryFunction",
     testonly = True,
     main_class = "com.google.cloud.functions.invoker.runner.Invoker",
     runtime_deps = [
-        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaImpressionQueryFunction_deploy.jar",
         "@maven//:com_google_cloud_functions_invoker_java_function_invoker",
+    ],
+)
+
+kt_jvm_test(
+    name = "MetaImpressionQueryFunctionDeployJarTest",
+    srcs = ["MetaImpressionQueryFunctionDeployJarTest.kt"],
+    data = [":InvokeMetaImpressionQueryFunction"],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionDeployJarTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
+        "@maven//:com_google_protobuf_protobuf_java",
+        "@maven//:com_google_truth_truth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core",
+        "@maven//:org_wfanet_measurement_common_testing",
     ],
 )
 
