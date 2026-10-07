@@ -46,16 +46,17 @@ import org.wfanet.measurement.gcloud.testing.FunctionsFrameworkInvokerProcess
 @RunWith(JUnit4::class)
 class MetaImpressionQueryFunctionInvokerTest {
   private val metaRequests = AtomicInteger()
+  private var metaErrorBody = AUTH_ERROR_BODY
   private lateinit var metaServer: HttpServer
   private lateinit var functionProcess: FunctionsFrameworkInvokerProcess
 
   @Before
   fun startFakeMeta() {
-    // Rejects every call the way Meta rejects an expired or revoked token.
+    // Rejects every call with [metaErrorBody].
     metaServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     metaServer.createContext("/") { exchange ->
       metaRequests.incrementAndGet()
-      val body = AUTH_ERROR_BODY.toByteArray()
+      val body = metaErrorBody.toByteArray()
       exchange.sendResponseHeaders(400, body.size.toLong())
       exchange.responseBody.use { it.write(body) }
     }
@@ -72,6 +73,21 @@ class MetaImpressionQueryFunctionInvokerTest {
 
   @Test
   fun `returns 502 at the function boundary when Meta rejects the credentials`() {
+    assertThat(queryFunction()).isEqualTo(502)
+    // The 502 came from Meta rejecting the token, not from a failure before Meta was called.
+    assertThat(metaRequests.get()).isGreaterThan(0)
+  }
+
+  @Test
+  fun `returns 403 at the function boundary when Meta denies access to the ad account`() {
+    metaErrorBody = PERMISSION_ERROR_BODY
+
+    assertThat(queryFunction()).isEqualTo(403)
+    assertThat(metaRequests.get()).isGreaterThan(0)
+  }
+
+  /** Starts the function against the fake Graph API, sends one query, and returns its status. */
+  private fun queryFunction(): Int {
     functionProcess =
       FunctionsFrameworkInvokerProcess(
         javaBinaryPath = FUNCTION_BINARY_PATH,
@@ -96,10 +112,7 @@ class MetaImpressionQueryFunctionInvokerTest {
             .build(),
           HttpResponse.BodyHandlers.discarding(),
         )
-
-    assertThat(response.statusCode()).isEqualTo(502)
-    // The 502 came from Meta rejecting the token, not from a failure before Meta was called.
-    assertThat(metaRequests.get()).isGreaterThan(0)
+    return response.statusCode()
   }
 
   companion object {
@@ -122,6 +135,10 @@ class MetaImpressionQueryFunctionInvokerTest {
     private const val AUTH_ERROR_BODY =
       """{"error":{"message":"Error validating access token","type":"OAuthException",""" +
         """"code":190,"error_subcode":463}}"""
+
+    private const val PERMISSION_ERROR_BODY =
+      """{"error":{"message":"(#200) Requires ads_read permission","type":"OAuthException",""" +
+        """"code":200}}"""
 
     private val QUERY_REQUEST = dataProviderImpressionQueryRequest {
       requestId = "f47ac10b-58cc-4372-a567-0e02b2c3d479"

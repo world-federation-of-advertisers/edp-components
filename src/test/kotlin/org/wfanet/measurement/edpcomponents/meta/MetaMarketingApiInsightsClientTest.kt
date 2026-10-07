@@ -493,6 +493,77 @@ class MetaMarketingApiInsightsClientTest {
 
     assertThat(failure).isNotInstanceOf(MetaRateLimitException::class.java)
     assertThat(failure).isNotInstanceOf(MetaAuthException::class.java)
+    assertThat(failure).isNotInstanceOf(MetaPermissionDeniedException::class.java)
+  }
+
+  @Test
+  fun `classifies every permission error code as MetaPermissionDeniedException`() {
+    // 10 and the whole 200-299 family mean the token is valid but lacks this ad account.
+    for (code in listOf(10L, 200L, 250L, 299L)) {
+      insightsIndex = 0
+      insightsResponses =
+        listOf(
+          400 to
+            """{"error":{"message":"(#$code) permission denied","type":"OAuthException",""" +
+              """"code":$code}}"""
+        )
+
+      assertFailsWith<MetaPermissionDeniedException>("code $code should classify as permission") {
+        client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      }
+    }
+  }
+
+  @Test
+  fun `does not classify codes either side of the permission range as permission denied`() {
+    for (code in listOf(199L, 300L)) {
+      insightsIndex = 0
+      insightsResponses = listOf(400 to """{"error":{"message":"other","code":$code}}""")
+
+      val failure =
+        assertFailsWith<MetaApiException> {
+          client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+        }
+
+      assertThat(failure).isNotInstanceOf(MetaPermissionDeniedException::class.java)
+    }
+  }
+
+  @Test
+  fun `classifies a permission error embedded in a 200 during a node lookup`() {
+    accountIdBody =
+      """{"error":{"message":"(#200) Requires ads_read permission","type":"OAuthException",""" +
+        """"code":200}}"""
+
+    assertFailsWith<MetaPermissionDeniedException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `classifies code 100 subcode 33 as MetaEntityNotFoundException`() {
+    // Meta uses 100/33 both for an object that does not exist and for one the token cannot reach.
+    insightsResponses =
+      listOf(
+        400 to
+          """{"error":{"message":"Unsupported get request.","type":"GraphMethodException",""" +
+            """"code":100,"error_subcode":33}}"""
+      )
+
+    assertFailsWith<MetaEntityNotFoundException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
+  }
+
+  @Test
+  fun `classifies code 100 subcode 33 embedded in a 200 during a node lookup`() {
+    accountIdBody =
+      """{"error":{"message":"Unsupported get request.","type":"GraphMethodException",""" +
+        """"code":100,"error_subcode":33}}"""
+
+    assertFailsWith<MetaEntityNotFoundException> {
+      client().queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    }
   }
 
   @Test
@@ -655,6 +726,55 @@ class MetaMarketingApiInsightsClientTest {
       .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
     assertThat(records[2].message)
       .contains("(suppressed ${SAMPLE_INTERVAL - 1} since the previous entry)")
+  }
+
+  @Test
+  fun `does not count failed responses toward the quota log sample`() {
+    // Only served requests advance the cadence; a throttle is logged separately at WARNING.
+    // Warm the account and timezone caches first, as in the cadence test above.
+    quotaHeader = null
+    val throttle = 400 to """{"error":{"message":"too many calls","code":80000}}"""
+    insightsResponses =
+      listOf(
+        200 to """{"data":[]}""",
+        200 to """{"data":[]}""",
+        throttle,
+        throttle,
+        200 to """{"data":[]}""",
+        200 to """{"data":[]}""",
+      )
+    val client = client(quotaLogSampleInterval = 2L)
+    client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    quotaHeader = """{"1":[{"type":"ads_insights","call_count":1}]}"""
+
+    val records = mutableListOf<LogRecord>()
+    val handler =
+      object : Handler() {
+        override fun publish(record: LogRecord) {
+          records.add(record)
+        }
+
+        override fun flush() {}
+
+        override fun close() {}
+      }
+    val logger = Logger.getLogger(MetaMarketingApiInsightsClient::class.java.name)
+    logger.addHandler(handler)
+    try {
+      client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      repeat(2) {
+        assertFailsWith<MetaRateLimitException> {
+          client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+        }
+      }
+      client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+      client.queryImpressions(listOf(campaignTarget()), alignedInterval(), UNFILTERED)
+    } finally {
+      logger.removeHandler(handler)
+    }
+
+    // Successes 1 and 3 are sampled. Counting the throttles too would sample a third entry.
+    assertThat(records.filter { it.message.startsWith("Meta quota") }).hasSize(2)
   }
 
   private fun campaignTarget() = MetaInsightsTarget(nodeId = "111", level = "campaign")

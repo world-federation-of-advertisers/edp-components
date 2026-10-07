@@ -121,6 +121,16 @@ class MetaAuthException(message: String, cause: Throwable? = null) :
   MetaApiException(message, cause)
 
 /**
+ * Meta denied the credentials access to the requested object — error `code` 10 or 200–299.
+ *
+ * Distinct from [MetaAuthException]: the token is valid, but the account behind it has not been
+ * granted this ad account. That is routine while ad accounts are being onboarded, so it must not
+ * read as a credential outage affecting every request.
+ */
+class MetaPermissionDeniedException(message: String, cause: Throwable? = null) :
+  MetaApiException(message, cause)
+
+/**
  * The requested time interval cannot be expressed as a Meta day-granular `time_range` — i.e. it is
  * not aligned to midnight boundaries in the ad account's timezone. Meta Insights only supports
  * whole days in the account's timezone, so sub-day or unaligned intervals cannot be answered.

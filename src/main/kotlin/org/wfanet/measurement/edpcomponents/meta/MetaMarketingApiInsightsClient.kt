@@ -241,8 +241,6 @@ class MetaMarketingApiInsightsClient(
         throw MetaApiException("Marketing API request failed for $nodeForError", e)
       }
 
-    logThrottleHeaders(response, nodeForError)
-
     val status = response.statusCode()
     // Meta answers this endpoint with 200 or an error; any other success status is unexpected and
     // is surfaced rather than parsed as though it carried an Insights payload.
@@ -271,6 +269,14 @@ class MetaMarketingApiInsightsClient(
         )
       error?.isAuthFailure == true ->
         MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
+      error?.isPermissionDenied == true ->
+        MetaPermissionDeniedException(
+          "Marketing API denied access. ${error.describe(nodeForError)}"
+        )
+      error?.isInaccessible == true ->
+        MetaEntityNotFoundException(
+          "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}"
+        )
       status == 404 -> MetaEntityNotFoundException("Meta node $nodeForError not found")
       error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
       else ->
@@ -297,10 +303,10 @@ class MetaMarketingApiInsightsClient(
   /**
    * Quota consumption and `ads_api_access_tier` are observable only from these headers, so a sample
    * is logged at INFO — FINE is suppressed by the default JUL configuration, which would write them
-   * nowhere. Throttles are logged in full by the caller of [exceptionFor].
+   * nowhere. Only successful responses are counted, so the sample cadence tracks served requests;
+   * throttles are logged in full by the caller of [exceptionFor].
    */
-  private fun logThrottleHeaders(response: HttpResponse<*>, nodeForError: String) {
-    val headers = throttleHeadersOf(response)
+  private fun logSampledQuota(headers: ThrottleHeaders, nodeForError: String) {
     if (headers.isEmpty()) return
     val seen = quotaResponsesSeen.incrementAndGet()
     // Sample the first response and every quotaLogSampleInterval-th one after it (1, 1001, 2001,
@@ -326,6 +332,7 @@ class MetaMarketingApiInsightsClient(
         throw MetaApiException("Malformed Insights JSON for $nodeForError: ${body.take(200)}", e)
       } ?: throw MetaApiException("Empty Insights response for $nodeForError")
     page.error.throwIfPresent(nodeForError, quota)
+    logSampledQuota(quota, nodeForError)
     return page
   }
 
@@ -340,6 +347,7 @@ class MetaMarketingApiInsightsClient(
         )
       } ?: throw MetaApiException("Empty node response for $nodeForError")
     node.error.throwIfPresent(nodeForError, response.quota)
+    logSampledQuota(response.quota, nodeForError)
     return node
   }
 
@@ -353,6 +361,12 @@ class MetaMarketingApiInsightsClient(
         MetaRateLimitException("Marketing API throttled. ${describe(nodeForError)}. Quota: $quota")
       isAuthFailure ->
         MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
+      isPermissionDenied ->
+        MetaPermissionDeniedException("Marketing API denied access. ${describe(nodeForError)}")
+      isInaccessible ->
+        MetaEntityNotFoundException(
+          "Meta node $nodeForError not found or not accessible. ${describe(nodeForError)}"
+        )
       else -> MetaApiException(describe(nodeForError))
     }
   }
@@ -406,6 +420,17 @@ class MetaMarketingApiInsightsClient(
     /** Whether Meta rejected the credentials. See [MetaAuthException]. */
     val isAuthFailure: Boolean
       get() = code == AUTH_ERROR_CODE
+
+    /** Whether the token is valid but lacks access. See [MetaPermissionDeniedException]. */
+    val isPermissionDenied: Boolean
+      get() = code == PERMISSION_ERROR_CODE || code in PERMISSION_ERROR_CODE_RANGE
+
+    /**
+     * Whether the object is missing or the token cannot reach it. Meta reports both the same way,
+     * so they cannot be told apart.
+     */
+    val isInaccessible: Boolean
+      get() = code == INACCESSIBLE_ERROR_CODE && subcode == INACCESSIBLE_ERROR_SUBCODE
 
     fun describe(nodeForError: String): String =
       "Meta returned error for $nodeForError: $message " +
@@ -462,6 +487,13 @@ class MetaMarketingApiInsightsClient(
       )
 
     private const val AUTH_ERROR_CODE = 190L
+
+    // https://developers.facebook.com/docs/graph-api/guides/error-handling/
+    // https://developers.facebook.com/docs/marketing-api/error-reference/
+    private const val PERMISSION_ERROR_CODE = 10L
+    private val PERMISSION_ERROR_CODE_RANGE = 200L..299L
+    private const val INACCESSIBLE_ERROR_CODE = 100L
+    private const val INACCESSIBLE_ERROR_SUBCODE = 33L
 
     // Logged so quota consumption and `ads_api_access_tier` are visible before requests start
     // being rejected.
