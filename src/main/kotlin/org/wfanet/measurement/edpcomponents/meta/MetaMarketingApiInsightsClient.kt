@@ -413,7 +413,7 @@ class MetaMarketingApiInsightsClient(
     val type: String? = null,
     @SerializedName("fbtrace_id") val fbtraceId: String? = null,
   ) {
-    /** Whether this is a Business Use Case throttle. See [MetaRateLimitException]. */
+    /** Whether this is a throttle under any recognised rate limit. See [MetaRateLimitException]. */
     val isRateLimit: Boolean
       get() = code in RATE_LIMIT_CODES
 
