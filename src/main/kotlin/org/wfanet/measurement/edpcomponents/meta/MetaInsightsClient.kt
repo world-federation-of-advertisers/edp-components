@@ -93,8 +93,50 @@ enum class MetaGender(val apiValue: String) {
 class MetaEntityNotFoundException(message: String, cause: Throwable? = null) :
   Exception(message, cause)
 
-/** The Marketing API call failed (network, auth, rate limit, 5xx, etc.). */
-class MetaApiException(message: String, cause: Throwable? = null) : Exception(message, cause)
+/** The Marketing API call failed (network, 5xx, malformed response, etc.). */
+open class MetaApiException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * Meta throttled the request under a rate limit.
+ *
+ * Distinct from [MetaApiException] because it is **transient and self-correcting**, where a
+ * malformed request is neither. Meta signals throttling with HTTP 400 and an error `code`, never
+ * HTTP 429, which the Marketing API does not return, so status alone cannot distinguish a throttle
+ * from a bad request. The recognised codes are:
+ * - 80000 (Ads Insights) and 80004 (Ads Management): Business Use Case limits, counted per ad
+ *   account.
+ * - 4 and 341 (application) and 17 (user): Platform limits, counted per app or per user across
+ *   every ad account.
+ * - 613: a custom rate limit.
+ *
+ * Page codes such as 80001 are not recognised, because this client never calls the Pages API.
+ *
+ * Handling is to wait out the window rather than retrying. For a Business Use Case limit,
+ * `X-Business-Use-Case-Usage` carries `estimated_time_to_regain_access` for the affected ad
+ * account; app and user limits are reported in `X-App-Usage`.
+ */
+class MetaRateLimitException(message: String, cause: Throwable? = null) :
+  MetaApiException(message, cause)
+
+/**
+ * Meta rejected the credentials — error `code` 190, typically an expired or revoked access token.
+ *
+ * Distinct from [MetaApiException] because it is **not transient**: every subsequent call fails
+ * identically until the token is replaced. It warrants alerting rather than being counted among
+ * ordinary API errors.
+ */
+class MetaAuthException(message: String, cause: Throwable? = null) :
+  MetaApiException(message, cause)
+
+/**
+ * Meta denied the credentials access to the requested object — error `code` 10 or 200–299.
+ *
+ * Distinct from [MetaAuthException]: the token is valid, but the account behind it has not been
+ * granted this ad account. That is routine while ad accounts are being onboarded, so it must not
+ * read as a credential outage affecting every request.
+ */
+class MetaPermissionDeniedException(message: String, cause: Throwable? = null) :
+  MetaApiException(message, cause)
 
 /**
  * The requested time interval cannot be expressed as a Meta day-granular `time_range` — i.e. it is
