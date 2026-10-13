@@ -183,6 +183,20 @@ class MetaImpressionQueryFunctionTest {
   }
 
   @Test
+  fun `service returns 403 when Meta denies access to the ad account`() {
+    // Distinct from a rejected token: one account missing its grant is routine during onboarding
+    // and must not read as a credential outage.
+    val httpResponse = FakeHttpResponse()
+
+    MetaImpressionQueryFunction(
+        FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access"))
+      )
+      .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
+
+    assertThat(httpResponse.statusCode).isEqualTo(403)
+  }
+
+  @Test
   fun `returns the impression count and routes campaign entities to campaign-level targets`() {
     val fake = FakeMetaInsightsClient(result = 12_345L)
 

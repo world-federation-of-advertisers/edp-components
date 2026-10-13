@@ -16,7 +16,7 @@
 
 package org.wfanet.measurement.edpcomponents.meta
 
-import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.google.protobuf.timestamp
 import com.google.type.interval
 import java.time.Instant
@@ -56,19 +56,21 @@ class MetaMarketingApiInsightsClientRealTest {
   private val startEpochSeconds: String? = System.getenv("META_TEST_START_EPOCH_SECONDS")
   private val endEpochSeconds: String? = System.getenv("META_TEST_END_EPOCH_SECONDS")
 
-  /** Optional. When set, the returned count must equal it exactly. */
+  /** The count the query must return exactly. */
   private val expectedImpressions: String? = System.getenv("META_TEST_EXPECTED_IMPRESSIONS")
 
   @Before
   fun requireCredentialsAndTarget() {
     assumeTrue(
       "Skipping live Meta test. Set META_ACCESS_TOKEN, META_APP_SECRET, META_TEST_ENTITY_ID, " +
-        "META_TEST_START_EPOCH_SECONDS, and META_TEST_END_EPOCH_SECONDS to run it.",
+        "META_TEST_START_EPOCH_SECONDS, META_TEST_END_EPOCH_SECONDS, and " +
+        "META_TEST_EXPECTED_IMPRESSIONS to run it.",
       !accessToken.isNullOrEmpty() &&
         !appSecret.isNullOrEmpty() &&
         !entityId.isNullOrEmpty() &&
         !startEpochSeconds.isNullOrEmpty() &&
-        !endEpochSeconds.isNullOrEmpty(),
+        !endEpochSeconds.isNullOrEmpty() &&
+        !expectedImpressions.isNullOrEmpty(),
     )
   }
 
@@ -100,12 +102,10 @@ class MetaMarketingApiInsightsClientRealTest {
         "${Instant.ofEpochSecond(endEpochSeconds!!.toLong())})"
     )
 
-    // A campaign with no delivery in the window legitimately returns 0, so only assert
-    // non-negativity unless an expected total was supplied.
-    assertThat(count).isAtLeast(0L)
-    if (!expectedImpressions.isNullOrEmpty()) {
-      assertThat(count).isEqualTo(expectedImpressions.toLong())
-    }
+    // Compared as a boolean so a mismatch does not print either count into the CI log.
+    assertWithMessage("live count does not match META_TEST_EXPECTED_IMPRESSIONS")
+      .that(count == expectedImpressions!!.toLong())
+      .isTrue()
   }
 
   companion object {

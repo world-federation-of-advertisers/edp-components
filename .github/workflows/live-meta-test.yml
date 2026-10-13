@@ -87,6 +87,9 @@ jobs:
             [[ "${pair#*:}" =~ ^[0-9]+$ ]] || fail "${pair%%:*} must be a nonnegative integer"
           done
           (( start < end )) || fail "start_epoch_seconds must be before end_epoch_seconds"
+          # Values exported through GITHUB_ENV are shown in later steps' logs, and Actions
+          # variables are not masked. The count is advertiser data alongside the logged entity ID.
+          echo "::add-mask::$expected"
 
           {
             echo "META_TEST_ENTITY_ID=$entity_id"

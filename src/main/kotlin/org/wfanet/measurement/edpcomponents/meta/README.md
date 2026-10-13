@@ -95,7 +95,7 @@ PY
 | `META_TEST_ENTITY_TYPE` | no | Defaults to `campaign` |
 | `META_TEST_START_EPOCH_SECONDS` | yes | Interval start — a whole hour in the account's zone |
 | `META_TEST_END_EPOCH_SECONDS` | yes | Interval end, exclusive — a whole hour |
-| `META_TEST_EXPECTED_IMPRESSIONS` | no | When set, the count must equal it exactly |
+| `META_TEST_EXPECTED_IMPRESSIONS` | yes | The count the query must return exactly |
 
 It can also be run from CI by dispatching the **Live Meta test** workflow against a GitHub
 environment holding `META_ACCESS_TOKEN` and `META_APP_SECRET` as secrets, and the target as a
@@ -131,11 +131,73 @@ bazel test \
   --test_env=META_TEST_ENTITY_ID --test_env=META_TEST_ENTITY_TYPE \
   --test_env=META_TEST_START_EPOCH_SECONDS \
   --test_env=META_TEST_END_EPOCH_SECONDS \
+  --test_env=META_TEST_EXPECTED_IMPRESSIONS \
   --test_output=all
 ```
 
 Prefer a window that closed at least a month ago: Meta's impression figures can continue to move
 for some weeks after delivery, so recent windows are a poor basis for an exact assertion.
+
+## Building and deploying
+
+There is no `main()`. The Cloud Functions Gen 2 runtime supplies the functions-framework server and
+calls `MetaImpressionQueryFunction.service()` per request; the class is a handler, not a program.
+The `--entry-point` flag below is how the runtime finds it, and it is **not validated at deploy
+time** — a typo deploys successfully and then 500s on every request.
+
+Build the uber jar:
+
+```bash
+bazel build //src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:MetaImpressionQueryFunction_deploy.jar
+```
+
+`gcloud` uploads the whole `--source` **directory**, so stage the jar on its own:
+
+```bash
+STAGING="$(mktemp -d)"
+cp bazel-bin/src/main/kotlin/org/wfanet/measurement/edpcomponents/meta/MetaImpressionQueryFunction_deploy.jar \
+   "$STAGING/"
+
+gcloud functions deploy meta-impression-query \
+  --gen2 \
+  --runtime=java17 \
+  --entry-point=org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunction \
+  --source="$STAGING" \
+  --trigger-http \
+  --no-allow-unauthenticated \
+  --region=<region> \
+  --timeout=25s \
+  --run-service-account=<service-account-email> \
+  --set-secrets=META_ACCESS_TOKEN=meta-access-token:latest,META_APP_SECRET=meta-app-secret:latest
+```
+
+`--timeout` must stay below the caller's deadline. `EdpValidationPostProcessor` stops waiting
+after 30 seconds, so relying on the platform default leaves this function running and consuming
+Meta quota after the caller has already abandoned the response.
+
+`--no-allow-unauthenticated` is the entire auth story: Google rejects any caller without a valid
+OIDC ID token before this code runs. Grant the Results Fulfiller service account
+`roles/run.invoker` on the deployed function, and grant the function's own service account
+`roles/secretmanager.secretAccessor` on both secrets.
+
+Smoke-test a deployment:
+
+```bash
+curl -X POST "$(gcloud functions describe meta-impression-query --gen2 --region=<region> --format='value(serviceConfig.uri)')" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/x-protobuf" \
+  --data-binary @request.pb --output response.pb
+```
+
+where `request.pb` is a serialized `DataProviderImpressionQueryRequest`. Note the interval must be
+whole days in the ad account's timezone — see the alignment note above.
+
+For a throwaway dev deployment, `--set-env-vars=META_ACCESS_TOKEN=...,META_APP_SECRET=...` avoids
+provisioning Secret Manager. Never do this outside a disposable test project: the values are
+visible in the function's configuration.
+
+Managed deployment (Terraform, mirroring the `http-cloud-function` module used by the EDP
+Aggregator functions) is not wired up yet.
 
 ## Status
 
@@ -149,5 +211,5 @@ Open TODOs (tracked in code):
   alongside `age` or `gender`, so a filtered interval needing hourly boundary queries cannot be
   answered at all (world-federation-of-advertisers/edp-components#16).
 - **Async Insights** report-run path for large queries.
-- **Gen-2 deploy target** — `java_binary` + container image.
+- **Terraform deploy config** — the `java_binary` exists (see above); managed deployment does not.
 - **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.

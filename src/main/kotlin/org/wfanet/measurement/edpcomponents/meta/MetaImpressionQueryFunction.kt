@@ -69,6 +69,11 @@ class MetaImpressionQueryFunction(
       // it would disable validation indefinitely without failing anything.
       logger.log(Level.SEVERE, "Meta rejected the configured credentials", e)
       response.setStatusCode(HTTP_BAD_GATEWAY)
+    } catch (e: MetaPermissionDeniedException) {
+      // Distinct from a rejected token: the credentials work but lack this ad account, which is
+      // routine while accounts are onboarded and must not look like a credential outage.
+      logger.log(Level.WARNING, "Meta denied access to the requested ad account", e)
+      response.setStatusCode(HTTP_FORBIDDEN)
     } catch (e: Exception) {
       logger.log(Level.SEVERE, "Impression query failed", e)
       response.setStatusCode(HTTP_INTERNAL_SERVER_ERROR)
@@ -124,6 +129,8 @@ class MetaImpressionQueryFunction(
       throw e
     } catch (e: MetaAuthException) {
       throw e
+    } catch (e: MetaPermissionDeniedException) {
+      throw e
     } catch (e: MetaApiException) {
       logger.log(Level.WARNING, "Marketing API error for request ${request.requestId}", e)
       skip(request.requestId, SkipReason.API_ERROR, e.message ?: "Marketing API error")
@@ -160,6 +167,7 @@ class MetaImpressionQueryFunction(
 
     private const val HTTP_INTERNAL_SERVER_ERROR = 500
     private const val HTTP_BAD_GATEWAY = 502
+    private const val HTTP_FORBIDDEN = 403
     private const val HTTP_TOO_MANY_REQUESTS = 429
 
     /**
@@ -173,6 +181,9 @@ class MetaImpressionQueryFunction(
      * ```
      *
      * https://cloud.google.com/functions/docs/configuring/secrets
+     *
+     * `META_GRAPH_API_BASE` optionally overrides the Graph API origin. Production leaves it unset;
+     * the function-boundary test points it at a fake Graph API.
      */
     private fun defaultInsightsClient(): MetaInsightsClient {
       val token =
@@ -185,7 +196,16 @@ class MetaImpressionQueryFunction(
           ?: error(
             "META_APP_SECRET not set (populated from Secret Manager at deploy via --set-secrets)"
           )
-      return MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
+      val graphApiBase = System.getenv("META_GRAPH_API_BASE")
+      return if (graphApiBase == null) {
+        MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
+      } else {
+        MetaMarketingApiInsightsClient(
+          accessToken = token,
+          appSecret = appSecret,
+          graphApiBase = graphApiBase,
+        )
+      }
     }
   }
 }

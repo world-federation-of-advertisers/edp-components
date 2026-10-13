@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,6 +39,15 @@ jobs:
     steps:
       - name: Check out revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Configure Maven credentials
+        env:
+          PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES_USER: ${{ github.actor }}
+        run: |
+          printf 'machine maven.pkg.github.com\nlogin %s\npassword %s\n' \
+            "$PACKAGES_USER" "$PACKAGES_TOKEN" > ~/.netrc
+          chmod 600 ~/.netrc
 
       - name: Set up Bazel
         uses: world-federation-of-advertisers/actions/setup-bazel@390a9ea948eef416333f8c257ef6116552a42d23 # v2.6.0
