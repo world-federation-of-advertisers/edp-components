@@ -27,8 +27,9 @@ Bazel registry).
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
    `FILTER_NOT_SUPPORTED`. Age/gender breakdown translation is tracked as a TODO (see Status).
 4. `MetaMarketingApiInsightsClient` — resolve the ad-account timezone, split the interval into the
-   Insights queries that cover it exactly (one daily query for the interior whole days, one hourly
-   query per partial boundary day), query Graph API Insights, follow paging, sum matching buckets.
+   Insights queries that cover the effective interval exactly (one daily query for the interior
+   whole days, one hourly query per partial boundary day), query Graph API Insights, follow paging,
+   sum matching buckets.
 5. Return the count, or a skip reason.
 
 ## Auth

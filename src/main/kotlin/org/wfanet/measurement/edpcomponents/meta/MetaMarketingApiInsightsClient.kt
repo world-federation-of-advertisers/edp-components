@@ -326,7 +326,7 @@ class MetaMarketingApiInsightsClient(
    * the two occurrences produce an empty hour range and a count of zero, when the honest answer is
    * that the interval cannot be measured.
    *
-   * A zone at a half-hour offset (for example `Asia/Kolkata`) puts a UTC-aligned bound exactly
+   * A zone at a half-hour offset (for example `Asia/Kolkata`) puts a UTC whole-hour bound exactly
    * halfway through a bucket, so every such bound ties and resolves earlier. Meta cannot split a
    * bucket, so the alternative to moving the bound is answering nothing at all.
    *
