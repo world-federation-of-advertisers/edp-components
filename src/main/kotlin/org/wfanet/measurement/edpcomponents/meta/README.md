@@ -43,9 +43,10 @@ tagged `manual`, so `bazel test //...` never picks it up, and it self-skips when
 variables are unset.
 
 **The interval need not be day-aligned in the ad account's own timezone.** Meta answers whole days,
-and whole hours within one day, in that timezone, so an interval is covered by querying the interior
-whole days plus the hourly buckets of each partial boundary day. A UTC-midnight window on a non-UTC
-account works.
+and whole hours within one day, in that timezone, so a query for the interior whole days plus the
+hourly buckets of each partial boundary day covers the effective interval exactly; the client may
+first move either requested bound to the nearest Meta bucket edge, as below. A UTC-midnight window
+on a non-UTC account works.
 
 **The count is exact for the *effective* interval, which is not always the one requested.** Meta
 cannot split a bucket, so a bound that does not land on a bucket edge moves to the nearest one, ties

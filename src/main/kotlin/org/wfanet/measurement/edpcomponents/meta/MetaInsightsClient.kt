@@ -33,9 +33,11 @@ interface MetaInsightsClient {
    * demographic buckets in [demographics].
    *
    * [timeInterval] need not be day-aligned in the ad account's timezone. A bound on a Meta bucket
-   * boundary there is answered exactly. The one bound that is not on a boundary — one inside an
-   * hour a daylight-saving fall-back repeats, which Meta reports as a single bucket — resolves to
-   * the earlier edge of that bucket, so the count can cover up to an hour more than requested.
+   * edge there is kept as it is. Any bound inside a Meta bucket moves to the nearest edge, ties
+   * resolving earlier: every UTC bound on an account at a half-hour offset does, as does a bound
+   * inside the hour a daylight-saving fall-back repeats, which Meta reports as a single bucket. The
+   * count is exact for that effective interval, which can cover up to an hour more or less than
+   * requested.
    *
    * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.

@@ -52,10 +52,10 @@ import javax.crypto.spec.SecretKeySpec
  * **Time zone.** Meta Insights buckets impressions by day in the *ad account's* immutable timezone,
  * and `time_range.until` is inclusive of its calendar date. The request interval is a half-open
  * `[start, end)` in absolute time, so this client resolves each node's ad-account timezone (an
- * extra Graph call, cached per account) and covers the interval exactly with the queries
- * [planQuery] produces: one daily query for the interior whole days, plus an hourly query for each
- * partial boundary day counting only the in-interval buckets. A day-aligned interval is still a
- * single daily query.
+ * extra Graph call, cached per account) and covers the effective interval, described below, exactly
+ * with the segments [buildQuerySegments] produces: one daily query for the interior whole days,
+ * plus an hourly query for each partial boundary day counting only the in-interval buckets. A
+ * day-aligned interval is still a single daily query.
  *
  * **The answer is exact for the effective interval, which is not always the requested one.** Meta's
  * smallest unit is one bucket and it cannot be split, so a bound that does not land on a bucket
@@ -131,7 +131,7 @@ class MetaMarketingApiInsightsClient(
     demographics: MetaDemographicFilter,
   ): Long {
     val zone: ZoneId = accountZone(target)
-    val segments: List<QuerySegment> = planQuery(timeInterval, zone)
+    val segments: List<QuerySegment> = buildQuerySegments(timeInterval, zone)
     // Meta rejects the hourly breakdown combined with age or gender, so a boundary day cannot be
     // both split by hour and filtered by demographic. Skip rather than compare a demographically
     // filtered reported count against an unfiltered publisher count.
@@ -241,8 +241,9 @@ class MetaMarketingApiInsightsClient(
   }
 
   /**
-   * Splits [interval] (half-open `[start, end)` in absolute time) into the Insights queries that
-   * together cover it exactly in [zone].
+   * Splits [interval] (half-open `[start, end)` in absolute time) into the Insights query segments
+   * that together cover the effective interval exactly in [zone]. Either requested bound may first
+   * move to the nearest Meta bucket edge.
    *
    * Meta buckets impressions by whole day in the ad account's timezone, so an interval whose bounds
    * are not account-local midnights cannot be answered by one daily query. The interior whole days
@@ -250,15 +251,15 @@ class MetaMarketingApiInsightsClient(
    * buckets are summed. That is at most two extra requests however long the interval is.
    *
    * A daylight-saving fall-back repeats a local hour, and Meta shares one bucket between both
-   * occurrences. That needs no special handling here: the plan is built from local date and local
-   * hour, which are identical for the two occurrences, so a bound at either one includes or
+   * occurrences. That needs no special handling here: the segments are built from local date and
+   * local hour, which are identical for the two occurrences, so a bound at either one includes or
    * excludes the whole shared bucket rather than splitting it. The effect is that a bound inside a
    * repeated hour resolves to the earlier of the two representable edges, which are equidistant.
    *
    * @throws MetaIntervalNotSupportedException if [interval] is empty, as requested or once its
    *   bounds are moved to bucket edges.
    */
-  private fun planQuery(interval: Interval, zone: ZoneId): List<QuerySegment> {
+  private fun buildQuerySegments(interval: Interval, zone: ZoneId): List<QuerySegment> {
     val requestedStart = instantOf(interval.startTime).atZone(zone)
     val requestedEnd = instantOf(interval.endTime).atZone(zone)
     val start = snapToBucketEdge(requestedStart)
