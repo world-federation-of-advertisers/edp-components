@@ -467,9 +467,10 @@ class MetaMarketingApiInsightsClient(
     // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
     //
     // Marketing API calls fall under Business Use Case limits, which is what the Insights endpoint
-    // and the ad-object reads here are subject to. The two Platform codes are included because an
-    // app- or account-wide throttle can still surface on these endpoints. Page codes (80001, 32)
-    // are deliberately absent: they apply to the Pages API, which this client never calls.
+    // and the ad-object reads here are subject to (80000, 80004). The app and user Platform codes
+    // (4, 341, 17) and the custom rate limit (613) are included because those throttles can still
+    // surface on these endpoints. Page codes (80001, 32) are deliberately absent: they apply to the
+    // Pages API, which this client never calls.
     private const val ADS_INSIGHTS_RATE_LIMIT_CODE = 80000L
     private const val ADS_MANAGEMENT_RATE_LIMIT_CODE = 80004L
     private const val APP_RATE_LIMIT_CODE = 4L
