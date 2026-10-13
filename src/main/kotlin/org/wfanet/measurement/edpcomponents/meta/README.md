@@ -51,7 +51,7 @@ on a non-UTC account works.
 **The count is exact for the *effective* interval, which is not always the one requested.** Meta
 cannot split a bucket, so a bound that does not land on a bucket edge moves to the nearest one, ties
 resolving earlier, and the run logs both intervals. Two things put a bound off an edge: a zone at a
-half-hour offset (`Asia/Kolkata` puts a UTC bound mid-bucket every time), and a bound inside the
+half-hour offset (`Asia/Kolkata` puts every UTC whole-hour bound mid-bucket), and a bound inside the
 hour a daylight-saving fall-back repeats, which Meta reports as one bucket covering both
 occurrences. Only an interval left empty by that adjustment is rejected.
 
@@ -190,8 +190,9 @@ curl -X POST "$(gcloud functions describe meta-impression-query --gen2 --region=
   --data-binary @request.pb --output response.pb
 ```
 
-where `request.pb` is a serialized `DataProviderImpressionQueryRequest`. Note the interval must be
-whole days in the ad account's timezone — see the alignment note above.
+where `request.pb` is a serialized `DataProviderImpressionQueryRequest`. The interval need not be
+whole days; a bound inside a Meta bucket moves to the nearest edge, as the alignment note above
+describes.
 
 For a throwaway dev deployment, `--set-env-vars=META_ACCESS_TOKEN=...,META_APP_SECRET=...` avoids
 provisioning Secret Manager. Never do this outside a disposable test project: the values are

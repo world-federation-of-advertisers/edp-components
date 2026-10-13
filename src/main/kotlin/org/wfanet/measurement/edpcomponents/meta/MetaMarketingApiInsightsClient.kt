@@ -43,11 +43,11 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * [MetaInsightsClient] backed by the Meta Marketing API (Graph API) Insights endpoint.
  *
- * For each target it issues a synchronous Insights query at the target's `level`, broken down by
- * `age` and `gender`, then sums the impressions of the buckets that match [MetaDemographicFilter].
- * Synchronous is sufficient for validation query sizes (a handful of entities over a report
- * interval); the async report-run path is deferred (see the class TODO and design doc §"future
- * work").
+ * For each target it issues synchronous Insights queries at the target's `level`. Daily segments
+ * are broken down by `age` and `gender`, summing the impressions of the buckets that match
+ * [MetaDemographicFilter]; partial boundary days use the hourly breakdown instead. Synchronous is
+ * sufficient for validation query sizes (a handful of entities over a report interval); the async
+ * report-run path is deferred (see the class TODO and design doc §"future work").
  *
  * **Time zone.** Meta Insights buckets impressions by day in the *ad account's* immutable timezone,
  * and `time_range.until` is inclusive of its calendar date. The request interval is a half-open
@@ -251,10 +251,10 @@ class MetaMarketingApiInsightsClient(
    * buckets are summed. That is at most two extra requests however long the interval is.
    *
    * A daylight-saving fall-back repeats a local hour, and Meta shares one bucket between both
-   * occurrences. That needs no special handling here: the segments are built from local date and
-   * local hour, which are identical for the two occurrences, so a bound at either one includes or
-   * excludes the whole shared bucket rather than splitting it. The effect is that a bound inside a
-   * repeated hour resolves to the earlier of the two representable edges, which are equidistant.
+   * occurrences, so that bucket spans two real hours. [snapToBucketEdge] has already moved a bound
+   * inside it to the nearest edge of the shared bucket; only a bound at its exact midpoint ties,
+   * and that resolves earlier. The segments are then built from local date and local hour, so they
+   * include or exclude the whole shared bucket rather than splitting it.
    *
    * @throws MetaIntervalNotSupportedException if [interval] is empty, as requested or once its
    *   bounds are moved to bucket edges.
@@ -289,7 +289,7 @@ class MetaMarketingApiInsightsClient(
       // Counting it once here is what keeps a single-day interval from being double-counted as
       // both a leading and a trailing partial day.
       return if (startsAtMidnight && endsAtMidnight) {
-        listOf(QuerySegment(firstDay, firstDay))
+        listOf(QuerySegment(firstDay, firstDay, hours = null))
       } else {
         val toHour = if (endsAtMidnight) HOURS_PER_DAY else end.hour
         listOf(hourlySegment(firstDay, start.hour, toHour))
@@ -303,7 +303,7 @@ class MetaMarketingApiInsightsClient(
       val wholeFrom = if (startsAtMidnight) firstDay else firstDay.plusDays(1)
       val wholeTo = if (endsAtMidnight) lastDay else lastDay.minusDays(1)
       if (!wholeFrom.isAfter(wholeTo)) {
-        add(QuerySegment(wholeFrom, wholeTo))
+        add(QuerySegment(wholeFrom, wholeTo, hours = null))
       }
       if (!endsAtMidnight) {
         add(hourlySegment(lastDay, 0, end.hour))
@@ -365,7 +365,7 @@ class MetaMarketingApiInsightsClient(
    * @throws MetaApiException if [bucket] is not one whole local hour in that form.
    */
   private fun hourOf(bucket: String, nodeForError: String): Int {
-    fun reject(cause: Throwable? = null): Nothing =
+    fun reject(cause: Throwable?): Nothing =
       throw MetaApiException(
         "Unrecognized $HOURLY_BREAKDOWN value '$bucket' for $nodeForError; expected " +
           "'HH:00:00${BUCKET_DELIMITER}HH:59:59'",
@@ -373,15 +373,15 @@ class MetaMarketingApiInsightsClient(
       )
 
     val endpoints = bucket.split(BUCKET_DELIMITER)
-    if (endpoints.size != 2) reject()
+    if (endpoints.size != 2) reject(null)
     val (from, to) =
       try {
         LocalTime.parse(endpoints[0]) to LocalTime.parse(endpoints[1])
       } catch (e: DateTimeParseException) {
         reject(e)
       }
-    if (from != LocalTime.of(from.hour, 0)) reject()
-    if (to != LocalTime.of(from.hour, 59, 59)) reject()
+    if (from != LocalTime.of(from.hour, 0)) reject(null)
+    if (to != LocalTime.of(from.hour, 59, 59)) reject(null)
     return from.hour
   }
 
@@ -396,7 +396,7 @@ class MetaMarketingApiInsightsClient(
   private data class QuerySegment(
     val since: LocalDate,
     val until: LocalDate,
-    val hours: IntRange? = null,
+    val hours: IntRange?,
   ) {
     init {
       require(hours == null || since == until) { "An hourly segment covers a single day" }

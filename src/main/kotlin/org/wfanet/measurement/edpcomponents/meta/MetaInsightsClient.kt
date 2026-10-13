@@ -34,15 +34,16 @@ interface MetaInsightsClient {
    *
    * [timeInterval] need not be day-aligned in the ad account's timezone. A bound on a Meta bucket
    * edge there is kept as it is. Any bound inside a Meta bucket moves to the nearest edge, ties
-   * resolving earlier: every UTC bound on an account at a half-hour offset does, as does a bound
-   * inside the hour a daylight-saving fall-back repeats, which Meta reports as a single bucket. The
-   * count is exact for that effective interval, which can cover up to an hour more or less than
-   * requested.
+   * resolving earlier: every UTC whole-hour bound on an account at a half-hour offset does, as does
+   * a bound inside the hour a daylight-saving fall-back repeats, which Meta reports as a single
+   * bucket. The count is exact for that effective interval, which can cover up to an hour more or
+   * less than requested.
    *
    * @throws MetaEntityNotFoundException if a target node is not found / not accessible.
    * @throws MetaApiException for any other Marketing API failure.
    * @throws MetaIntervalNotSupportedException if [timeInterval] is empty, as requested or once its
-   *   bounds are moved to bucket edges.
+   *   bounds are moved to bucket edges, or if it needs hourly boundary queries while [demographics]
+   *   restricts age or gender, which Meta does not allow together.
    */
   fun queryImpressions(
     targets: List<MetaInsightsTarget>,
