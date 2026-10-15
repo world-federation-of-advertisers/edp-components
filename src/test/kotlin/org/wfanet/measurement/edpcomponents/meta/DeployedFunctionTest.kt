@@ -50,7 +50,9 @@ import org.wfanet.measurement.api.v2alpha.impressionQuery
  * that covers the functions-framework entry point, OIDC enforcement, and secret injection, none of
  * which exist outside a real deployment.
  *
- * Tagged `manual` and skipped via [assumeTrue] when unconfigured, so it never runs in CI.
+ * Tagged `manual` and skipped via [assumeTrue] when unconfigured, so it never runs in this
+ * repository's CI. cross-media-measurement's Update CMMS runs it after deploying the function, so
+ * its output reaches a public CI log: it never prints the impression count.
  *
  * The request is built here rather than by hand because the body is binary protobuf — there is
  * otherwise no practical way to produce one for `curl`. Setting `META_TEST_WRITE_REQUEST_TO` writes
@@ -62,9 +64,8 @@ import org.wfanet.measurement.api.v2alpha.impressionQuery
  *   --data-binary @/tmp/request.pb --output /tmp/response.pb
  * ```
  *
- * **The interval must be whole days in the ad account's timezone.** A UTC-aligned window is
- * answered with a `FILTER_NOT_SUPPORTED` skip rather than a count — expected behaviour today (see
- * edp-components#4), and reported as such rather than as a failure.
+ * The interval need not be whole days in the ad account's timezone: the function covers partial
+ * boundary days with hourly queries, and a bound inside a Meta bucket moves to the nearest edge.
  */
 @RunWith(JUnit4::class)
 class DeployedFunctionTest {
@@ -156,10 +157,16 @@ class DeployedFunctionTest {
     when {
       queryResponse.hasResult() -> {
         val count = queryResponse.result.value
-        logger.info("RESULT: impressions=$count")
-        assertThat(count).isAtLeast(0L)
+        // Compared as booleans so a failure does not print either count: an impression total for an
+        // identified entity is advertiser data, and this output can reach a public CI log.
+        assertWithMessage("count is negative").that(count >= 0).isTrue()
         if (!expectedImpressions.isNullOrEmpty()) {
-          assertThat(count).isEqualTo(expectedImpressions.toLong())
+          assertWithMessage("count does not match META_TEST_EXPECTED_IMPRESSIONS")
+            .that(count == expectedImpressions.toLong())
+            .isTrue()
+          logger.info("RESULT: count matched META_TEST_EXPECTED_IMPRESSIONS")
+        } else {
+          logger.info("RESULT: the function returned a count")
         }
       }
       queryResponse.hasSkipped() -> {
