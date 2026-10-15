@@ -36,7 +36,6 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
-import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
@@ -170,19 +169,11 @@ class DeployedFunctionTest {
         }
       }
       queryResponse.hasSkipped() -> {
+        // An unfiltered request over a valid interval is answered with a count, so any skip,
+        // FILTER_NOT_SUPPORTED included, means the deployment cannot answer the query it exists
+        // for.
         val skipped = queryResponse.skipped
-        logger.info("SKIPPED: ${skipped.reason} — ${skipped.detail}")
-
-        // Only the interval limitation is an acceptable skip for this request shape, and reaching
-        // it still proves transport, OIDC and secret injection all worked. ENTITY_NOT_FOUND means
-        // the configured entity is wrong and API_ERROR means the deployment cannot reach Meta —
-        // either would otherwise let this test pass against an unusable function.
-        assertWithMessage("deployment is not usable: ${skipped.detail}")
-          .that(skipped.reason)
-          .isEqualTo(SkipReason.FILTER_NOT_SUPPORTED)
-        assertWithMessage("expected a count but the function skipped: ${skipped.detail}")
-          .that(expectedImpressions.isNullOrEmpty())
-          .isTrue()
+        throw AssertionError("deployment skipped the query: ${skipped.reason} — ${skipped.detail}")
       }
       else -> throw AssertionError("Response set neither result nor skipped: $queryResponse")
     }
