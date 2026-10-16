@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       package-version:
-        description: "Maven version: a release such as 0.1.0, or empty for 0.0.0-<commit>"
+        description: "Maven version: a release such as 0.1.0 (run from tag v0.1.0), or empty for 0.0.0-<commit>"
         type: string
         required: false
 
@@ -64,10 +64,11 @@ jobs:
           distribution: zulu
           java-version: "17"
 
-      # With no version given, the version is derived from the source commit. It is not a SNAPSHOT,
-      # so GitHub Packages refuses to republish it and a pinned version always names exactly the
-      # code it was built from. A release version is used as is, and any other value becomes a
-      # SNAPSHOT so it cannot be mistaken for either.
+      # With no version given, the version is derived from the source commit, for testing before a
+      # release. A release such as 0.1.0 must be published from its tag v0.1.0, so the version always
+      # names the code in the JAR and cross-media-measurement tests the code it deployed. Neither is
+      # a SNAPSHOT, so GitHub Packages refuses to republish them. Any other value becomes a SNAPSHOT
+      # so it cannot be mistaken for either.
       - name: Resolve artifact version
         id: version
         env:
@@ -76,6 +77,10 @@ jobs:
           if [[ -z "$PACKAGE_VERSION" ]]; then
             artifact_version="0.0.0-${GITHUB_SHA:0:12}"
           elif [[ "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+)?$ ]]; then
+            if [[ "$GITHUB_REF" != "refs/tags/v$PACKAGE_VERSION" ]]; then
+              echo "Release $PACKAGE_VERSION must be published from tag v$PACKAGE_VERSION, not $GITHUB_REF" >&2
+              exit 1
+            fi
             artifact_version="$PACKAGE_VERSION"
           else
             artifact_version="0.0.0-${PACKAGE_VERSION}-SNAPSHOT"
