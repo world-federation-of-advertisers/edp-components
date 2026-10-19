@@ -45,7 +45,7 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * environment (Secret Manager) and never reach Results Fulfiller.
  */
 class MetaImpressionQueryFunction(
-  private val insightsClient: MetaInsightsClient = defaultInsightsClient()
+  private val insightsClient: MetaInsightsClient = metaMarketingApiClientFromEnvironment()
 ) : HttpFunction {
 
   override fun service(request: HttpRequest, response: HttpResponse) {
@@ -169,43 +169,5 @@ class MetaImpressionQueryFunction(
     private const val HTTP_BAD_GATEWAY = 502
     private const val HTTP_FORBIDDEN = 403
     private const val HTTP_TOO_MANY_REQUESTS = 429
-
-    /**
-     * Builds the production client with the Meta System User token and app secret.
-     *
-     * Both env vars are populated from Secret Manager at deploy time — no Kotlin changes needed —
-     * via the Cloud Functions Gen 2 `--set-secrets` flag:
-     * ```
-     * gcloud functions deploy ... \
-     *   --set-secrets=META_ACCESS_TOKEN=meta-access-token:latest,META_APP_SECRET=meta-app-secret:latest
-     * ```
-     *
-     * https://cloud.google.com/functions/docs/configuring/secrets
-     *
-     * `META_GRAPH_API_BASE` optionally overrides the Graph API origin. Production leaves it unset;
-     * the function-boundary test points it at a fake Graph API.
-     */
-    private fun defaultInsightsClient(): MetaInsightsClient {
-      val token =
-        System.getenv("META_ACCESS_TOKEN")
-          ?: error(
-            "META_ACCESS_TOKEN not set (populated from Secret Manager at deploy via --set-secrets)"
-          )
-      val appSecret =
-        System.getenv("META_APP_SECRET")
-          ?: error(
-            "META_APP_SECRET not set (populated from Secret Manager at deploy via --set-secrets)"
-          )
-      val graphApiBase = System.getenv("META_GRAPH_API_BASE")
-      return if (graphApiBase == null) {
-        MetaMarketingApiInsightsClient(accessToken = token, appSecret = appSecret)
-      } else {
-        MetaMarketingApiInsightsClient(
-          accessToken = token,
-          appSecret = appSecret,
-          graphApiBase = graphApiBase,
-        )
-      }
-    }
   }
 }

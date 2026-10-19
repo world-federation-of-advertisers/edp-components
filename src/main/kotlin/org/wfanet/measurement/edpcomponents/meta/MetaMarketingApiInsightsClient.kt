@@ -88,7 +88,7 @@ class MetaMarketingApiInsightsClient(
   private val httpClient: HttpClient =
     HttpClient.newBuilder().connectTimeout(CONNECT_TIMEOUT).build(),
   private val quotaLogSampleInterval: Long = DEFAULT_QUOTA_LOG_SAMPLE_INTERVAL,
-) : MetaInsightsClient {
+) : MetaInsightsClient, MetaAdAccountAccessChecker {
 
   init {
     require(quotaLogSampleInterval > 0) {
@@ -201,6 +201,34 @@ class MetaMarketingApiInsightsClient(
       nextUri = page.paging?.next?.let { URI.create(withAppSecretProof(it)) }
     }
     return total
+  }
+
+  override fun checkAdAccountAccess(adAccountId: String): MetaAdAccountAccess {
+    val node = "$ACCOUNT_PREFIX${adAccountId.removePrefix(ACCOUNT_PREFIX)}"
+    val uri = URI.create("$graphApiBase/$apiVersion/${node.urlEncoded()}?fields=id&$authQuery")
+    val response = send(uri, node)
+    val status = response.statusCode()
+    val error: MetaError? = parseErrorOrNull(response.body())
+    // A refusal tied to this account is a result to record. A throttle, a rejected token or any
+    // other failure says nothing about the account, so it is raised as on every other read.
+    val access: MetaAdAccountAccess? =
+      when {
+        error?.isRateLimit == true || error?.isAuthFailure == true -> null
+        error?.isPermissionDenied == true ->
+          MetaAdAccountAccess(
+            MetaAdAccountAccess.Result.PERMISSION_DENIED,
+            error.code,
+            error.subcode,
+          )
+        error?.isInaccessible == true || status == HTTP_NOT_FOUND ->
+          MetaAdAccountAccess(MetaAdAccountAccess.Result.INACCESSIBLE, error?.code, error?.subcode)
+        status == HTTP_OK && error == null ->
+          MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null)
+        else -> null
+      }
+    if (access != null) return access
+    if (status == HTTP_OK) error.throwIfPresent(node, throttleHeadersOf(response))
+    throw exceptionFor(status, response, node)
   }
 
   private fun withAppSecretProof(url: String): String {
@@ -412,22 +440,24 @@ class MetaMarketingApiInsightsClient(
 
   /** Sends a GET to [uri], mapping non-success statuses to exceptions. */
   private fun get(uri: URI, nodeForError: String): GraphResponse {
-    val response: HttpResponse<String> =
-      try {
-        httpClient.send(
-          HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT).GET().build(),
-          HttpResponse.BodyHandlers.ofString(),
-        )
-      } catch (e: Exception) {
-        throw MetaApiException("Marketing API request failed for $nodeForError", e)
-      }
-
+    val response: HttpResponse<String> = send(uri, nodeForError)
     val status = response.statusCode()
     // Meta answers this endpoint with 200 or an error; any other success status is unexpected and
     // is surfaced rather than parsed as though it carried an Insights payload.
     if (status == HTTP_OK) return GraphResponse(response.body(), throttleHeadersOf(response))
     throw exceptionFor(status, response, nodeForError)
   }
+
+  /** Sends a GET to [uri], returning the response whatever its status. */
+  private fun send(uri: URI, nodeForError: String): HttpResponse<String> =
+    try {
+      httpClient.send(
+        HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT).GET().build(),
+        HttpResponse.BodyHandlers.ofString(),
+      )
+    } catch (e: Exception) {
+      throw MetaApiException("Marketing API request failed for $nodeForError", e)
+    }
 
   /**
    * Maps a non-success response to the most specific exception it identifies, in precedence order.
@@ -458,7 +488,7 @@ class MetaMarketingApiInsightsClient(
         MetaEntityNotFoundException(
           "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}"
         )
-      status == 404 -> MetaEntityNotFoundException("Meta node $nodeForError not found")
+      status == HTTP_NOT_FOUND -> MetaEntityNotFoundException("Meta node $nodeForError not found")
       error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
       else ->
         MetaApiException(
@@ -652,6 +682,7 @@ class MetaMarketingApiInsightsClient(
     private const val DEFAULT_API_VERSION = "v25.0"
 
     private const val HTTP_OK = 200
+    private const val HTTP_NOT_FOUND = 404
 
     // https://developers.facebook.com/docs/graph-api/overview/rate-limiting
     //

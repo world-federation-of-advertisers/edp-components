@@ -202,6 +202,24 @@ visible in the function's configuration.
 Managed deployment (Terraform, mirroring the `http-cloud-function` module used by the EDP
 Aggregator functions) is not wired up yet.
 
+## Ad account access check
+
+`MetaAccountAccessCheckFunction` ships in the same jar. Cloud Scheduler calls it hourly; it reads
+each ad account in `META_EXPECTED_AD_ACCOUNT_IDS` (comma-separated) with `GET act_<id>?fields=id`
+and records the outcome in the `meta.account_access_checks_total` counter, with attributes
+`account_id`, `result` (`enabled`, `permission_denied` or `inaccessible`) and, for a refusal,
+Meta's `error_code` and `error_subcode`. That shows which advertisers are onboarded before any
+report queries them. It makes no Insights calls, and the impression query never calls it.
+
+Deploy it like the impression query, with
+`--entry-point=org.wfanet.measurement.edpcomponents.meta.MetaAccountAccessCheckFunction`, the same
+two secrets, and `--set-env-vars=META_EXPECTED_AD_ACCOUNT_IDS=...,OTEL_METRICS_EXPORTER=google_cloud_monitoring,OTEL_SERVICE_NAME=meta-account-access-check`.
+Its service account needs `roles/monitoring.metricWriter`. OpenTelemetry exporters default to
+`none`, so without `OTEL_METRICS_EXPORTER` nothing is exported.
+
+It responds 200 when every account was checked, whatever the results; 502 when Meta rejects the
+credentials; 429 when Meta throttles; and 500 when any other check failed.
+
 ## Status
 
 Implemented: request/response handling, entity-type routing for all four Meta Insights levels,
