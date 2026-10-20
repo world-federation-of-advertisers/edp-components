@@ -202,6 +202,16 @@ visible in the function's configuration.
 Managed deployment (Terraform, mirroring the `http-cloud-function` module used by the EDP
 Aggregator functions) is not wired up yet.
 
+## Metrics
+
+`MetaImpressionQueryFunction` records each query in the `meta.impression_queries_total` counter,
+with attributes `outcome` (`success`, a skip reason such as `entity_not_found`, or
+`permission_denied`, `rate_limited`, `auth_failed` or `error`) and `entity_type` (the Meta level
+queried). Meta reports an ad account that has not been shared with us the same way as a missing
+one, so `entity_not_found` and `permission_denied` usually mean an advertiser is not yet onboarded.
+Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME`, and grant the
+service account `roles/monitoring.metricWriter`, to export it.
+
 ## Ad account access check
 
 `MetaAccountAccessCheckFunction` ships in the same jar. Cloud Scheduler calls it hourly; it reads

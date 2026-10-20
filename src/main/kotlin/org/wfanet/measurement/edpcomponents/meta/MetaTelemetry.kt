@@ -47,6 +47,10 @@ object MetaTelemetry {
   /**
    * Exports pending metrics, returning whether that completed. Cloud Functions may freeze an idle
    * instance, so a handler calls this before it returns.
+   *
+   * Cloud Monitoring accepts one point per time series every 5 seconds, so during a burst it may
+   * reject a flush that closely follows another. Counters are cumulative, so the next accepted
+   * export restores the total.
    */
   fun flush(): Boolean {
     val result =

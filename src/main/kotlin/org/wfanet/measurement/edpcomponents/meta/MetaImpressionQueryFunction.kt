@@ -45,17 +45,34 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * environment (Secret Manager) and never reach Results Fulfiller.
  */
 class MetaImpressionQueryFunction(
-  private val insightsClient: MetaInsightsClient = metaMarketingApiClientFromEnvironment()
+  private val insightsClient: MetaInsightsClient,
+  private val metrics: MetaImpressionQueryMetrics,
+  private val flushTelemetry: () -> Unit,
 ) : HttpFunction {
+
+  /**
+   * Builds the function from its environment, as the Functions Framework does. See
+   * [metaMarketingApiClientFromEnvironment] for the Meta credentials.
+   */
+  constructor() :
+    this(
+      insightsClient = metaMarketingApiClientFromEnvironment(),
+      metrics = MetaImpressionQueryMetrics(MetaTelemetry.meter),
+      flushTelemetry = { MetaTelemetry.flush() },
+    )
 
   override fun service(request: HttpRequest, response: HttpResponse) {
     // Catch everything here so a failure (proto parse, an unroutable entity, etc.) is logged on the
     // Meta side and surfaced as an HTTP 500, rather than propagating with no local trace. Mirrors
     // the cloud functions in cross-media-measurement.
+    var outcome = MetaImpressionQueryMetrics.Outcome.ERROR
+    var entityType = UNKNOWN_ENTITY_TYPE
     try {
       val queryRequest =
         request.inputStream.use { DataProviderImpressionQueryRequest.parseFrom(it) }
+      entityType = entityTypeLabel(queryRequest)
       val queryResponse = handle(queryRequest)
+      outcome = outcomeOf(queryResponse)
       response.setContentType(PROTOBUF_CONTENT_TYPE)
       response.outputStream.use { queryResponse.writeTo(it) }
     } catch (e: MetaRateLimitException) {
@@ -63,20 +80,27 @@ class MetaImpressionQueryFunction(
       // with a status instead means the caller records `http_429` rather than folding a transient
       // throttle in with malformed requests.
       logger.log(Level.WARNING, "Meta throttled the impression query", e)
+      outcome = MetaImpressionQueryMetrics.Outcome.RATE_LIMITED
       response.setStatusCode(HTTP_TOO_MANY_REQUESTS)
     } catch (e: MetaAuthException) {
       // Distinct from a throttle: no amount of waiting fixes a revoked credential, and as a skip
       // it would disable validation indefinitely without failing anything.
       logger.log(Level.SEVERE, "Meta rejected the configured credentials", e)
+      outcome = MetaImpressionQueryMetrics.Outcome.AUTH_FAILED
       response.setStatusCode(HTTP_BAD_GATEWAY)
     } catch (e: MetaPermissionDeniedException) {
       // Distinct from a rejected token: the credentials work but lack this ad account, which is
       // routine while accounts are onboarded and must not look like a credential outage.
       logger.log(Level.WARNING, "Meta denied access to the requested ad account", e)
+      outcome = MetaImpressionQueryMetrics.Outcome.PERMISSION_DENIED
       response.setStatusCode(HTTP_FORBIDDEN)
     } catch (e: Exception) {
       logger.log(Level.SEVERE, "Impression query failed", e)
+      outcome = MetaImpressionQueryMetrics.Outcome.ERROR
       response.setStatusCode(HTTP_INTERNAL_SERVER_ERROR)
+    } finally {
+      metrics.record(outcome, entityType)
+      flushTelemetry()
     }
   }
 
@@ -123,6 +147,9 @@ class MetaImpressionQueryFunction(
         e.message ?: "interval not supported",
       )
     } catch (e: MetaEntityNotFoundException) {
+      // Meta reports an account that has not been shared with us the same way as a missing one,
+      // so this is often an advertiser not yet onboarded.
+      logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaRateLimitException) {
       // Rethrown rather than skipped so service() can answer with a status; see there.
@@ -152,6 +179,30 @@ class MetaImpressionQueryFunction(
     if (expression.isEmpty() || expression.trim() == "true") MetaDemographicFilter.UNFILTERED
     else null
 
+  /** The [MetaImpressionQueryMetrics.ENTITY_TYPE] label for [request]'s entities. */
+  private fun entityTypeLabel(request: DataProviderImpressionQueryRequest): String {
+    val levels =
+      request.query.entityKeysList
+        .map { MetaEntityLevels[it.entityType]?.level ?: UNSUPPORTED_ENTITY_TYPE }
+        .distinct()
+    return when {
+      levels.isEmpty() -> UNKNOWN_ENTITY_TYPE
+      UNSUPPORTED_ENTITY_TYPE in levels -> UNSUPPORTED_ENTITY_TYPE
+      levels.size > 1 -> MIXED_ENTITY_TYPE
+      else -> levels.single()
+    }
+  }
+
+  private fun outcomeOf(response: DataProviderImpressionQueryResponse) =
+    if (!response.hasSkipped()) MetaImpressionQueryMetrics.Outcome.SUCCESS
+    else
+      when (response.skipped.reason) {
+        SkipReason.FILTER_NOT_SUPPORTED -> MetaImpressionQueryMetrics.Outcome.FILTER_NOT_SUPPORTED
+        SkipReason.ENTITY_NOT_FOUND -> MetaImpressionQueryMetrics.Outcome.ENTITY_NOT_FOUND
+        SkipReason.API_ERROR -> MetaImpressionQueryMetrics.Outcome.API_ERROR
+        else -> MetaImpressionQueryMetrics.Outcome.ERROR
+      }
+
   private fun skip(requestId: String, reason: SkipReason, detail: String) =
     dataProviderImpressionQueryResponse {
       this.requestId = requestId
@@ -164,6 +215,9 @@ class MetaImpressionQueryFunction(
   companion object {
     private val logger = Logger.getLogger(MetaImpressionQueryFunction::class.java.name)
     private const val PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+    private const val UNKNOWN_ENTITY_TYPE = "unknown"
+    private const val UNSUPPORTED_ENTITY_TYPE = "unsupported"
+    private const val MIXED_ENTITY_TYPE = "mixed"
 
     private const val HTTP_INTERNAL_SERVER_ERROR = 500
     private const val HTTP_BAD_GATEWAY = 502

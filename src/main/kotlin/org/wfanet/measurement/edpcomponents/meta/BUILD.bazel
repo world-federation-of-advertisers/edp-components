@@ -21,6 +21,7 @@ kt_jvm_library(
         "MetaEntityLevel.kt",
         "MetaEnvironment.kt",
         "MetaImpressionQueryFunction.kt",
+        "MetaImpressionQueryMetrics.kt",
         "MetaInsightsClient.kt",
         "MetaMarketingApiInsightsClient.kt",
         "MetaTelemetry.kt",
