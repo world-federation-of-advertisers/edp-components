@@ -22,25 +22,52 @@ import io.opentelemetry.api.metrics.LongCounter
 import io.opentelemetry.api.metrics.Meter
 
 /**
- * Records impression queries as `meta.impression_queries_total`, keyed by [OUTCOME] and
- * [ENTITY_TYPE]. Unlike the hourly account check, this covers every account a report asks about,
- * including ones no one listed, so a rise in `entity_not_found` or `permission_denied` shows
- * advertisers whose access is missing.
+ * Metrics for [MetaImpressionQueryFunction]:
+ * - `meta.impression_query.queries`, one per query, keyed by [OUTCOME] and [ENTITY_TYPE].
+ * - `meta.impression_query.inaccessible_entities`, one per query Meta refused for lack of access,
+ *   keyed by [REASON], [ENTITY_TYPE], [NODE_ID] and, when the refused node is an ad account,
+ *   [ACCOUNT_ID]. Meta reports an ad account that has not been shared with us the same way as a
+ *   missing one and does not name the account behind a hidden campaign, so the node is often the
+ *   only identifier available. Unlike the hourly account check, this covers every entity a report
+ *   asks about, including those in accounts no one listed.
+ *
+ * The names and attributes are also used by the Meta impression-query dashboard in
+ * cross-media-measurement (`meta_impression_query_dashboard.json`); change both together.
  */
 class MetaImpressionQueryMetrics(meter: Meter) {
   private val queries: LongCounter =
     meter
-      .counterBuilder("meta.impression_queries_total")
+      .counterBuilder("meta.impression_query.queries")
       .setDescription("Meta impression queries, by outcome and entity type")
       .setUnit("{query}")
       .build()
 
+  private val inaccessibleEntities: LongCounter =
+    meter
+      .counterBuilder("meta.impression_query.inaccessible_entities")
+      .setDescription("Meta impression queries refused for lack of access, by Meta node")
+      .setUnit("{query}")
+      .build()
+
   /** Records one query with [outcome] for entities of [entityType]. */
-  fun record(outcome: Outcome, entityType: String) {
-    queries.add(
-      1,
-      Attributes.builder().put(OUTCOME, outcome.label).put(ENTITY_TYPE, entityType).build(),
-    )
+  fun recordQuery(outcome: Outcome, entityType: String) {
+    queries.add(1, Attributes.of(OUTCOME, outcome.label, ENTITY_TYPE, entityType))
+  }
+
+  /**
+   * Records a query for entities of [entityType] that Meta refused for [reason] at Graph node
+   * [nodeId].
+   */
+  fun recordInaccessibleEntity(reason: InaccessibleReason, entityType: String, nodeId: String) {
+    val attributes =
+      Attributes.builder()
+        .put(REASON, reason.label)
+        .put(ENTITY_TYPE, entityType)
+        .put(NODE_ID, nodeId)
+    if (nodeId.startsWith(ACCOUNT_PREFIX)) {
+      attributes.put(ACCOUNT_ID, nodeId.removePrefix(ACCOUNT_PREFIX))
+    }
+    inaccessibleEntities.add(1, attributes.build())
   }
 
   /** How an impression query ended, with the label it is recorded under. */
@@ -59,8 +86,16 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     RATE_LIMITED("rate_limited"),
     /** HTTP 502: Meta rejected the credentials. */
     AUTH_FAILED("auth_failed"),
-    /** HTTP 500: any other failure, including a malformed request. */
+    /** Any other failure, such as a malformed request; answered with HTTP 500. */
     ERROR("error"),
+  }
+
+  /** Why Meta refused a query for lack of access, with the label it is recorded under. */
+  enum class InaccessibleReason(val label: String) {
+    /** Error `code` 100 with subcode 33, or HTTP 404: missing or hidden from the token. */
+    ENTITY_NOT_FOUND("entity_not_found"),
+    /** Error `code` 10 or 200–299: visible, but the token has not been granted access. */
+    PERMISSION_DENIED("permission_denied"),
   }
 
   companion object {
@@ -69,8 +104,16 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     /**
      * Meta node level the request's entities are queried at (`campaign`, `adset`, `ad` or
      * `account`), `mixed` for several levels, `unsupported` for an unrecognized `entity_type`, or
-     * `unknown` when the request could not be read.
+     * `unknown` when the request could not be read or names no entities.
      */
     val ENTITY_TYPE: AttributeKey<String> = AttributeKey.stringKey("entity_type")
+    /** [InaccessibleReason.label] of a refused query. */
+    val REASON: AttributeKey<String> = AttributeKey.stringKey("reason")
+    /** Graph node Meta refused, such as a campaign ID or `act_<id>`. */
+    val NODE_ID: AttributeKey<String> = AttributeKey.stringKey("node_id")
+    /** The refused ad account, without its `act_` prefix, when [NODE_ID] is an ad account. */
+    val ACCOUNT_ID: AttributeKey<String> = AttributeKey.stringKey("account_id")
+
+    private const val ACCOUNT_PREFIX = "act_"
   }
 }

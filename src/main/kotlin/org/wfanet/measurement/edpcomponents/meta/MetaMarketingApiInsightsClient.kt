@@ -215,15 +215,18 @@ class MetaMarketingApiInsightsClient(
       when {
         error?.isRateLimit == true || error?.isAuthFailure == true -> null
         error?.isPermissionDenied == true ->
-          MetaAdAccountAccess(
-            MetaAdAccountAccess.Result.PERMISSION_DENIED,
+          MetaAdAccountAccess.Refused(
+            MetaAdAccountAccess.Reason.PERMISSION_DENIED,
             error.code,
             error.subcode,
           )
         error?.isInaccessible == true || status == HTTP_NOT_FOUND ->
-          MetaAdAccountAccess(MetaAdAccountAccess.Result.INACCESSIBLE, error?.code, error?.subcode)
-        status == HTTP_OK && error == null ->
-          MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null)
+          MetaAdAccountAccess.Refused(
+            MetaAdAccountAccess.Reason.INACCESSIBLE,
+            error?.code,
+            error?.subcode,
+          )
+        status == HTTP_OK && error == null -> MetaAdAccountAccess.Accessible
         else -> null
       }
     if (access != null) return access
@@ -482,13 +485,16 @@ class MetaMarketingApiInsightsClient(
         MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
       error?.isPermissionDenied == true ->
         MetaPermissionDeniedException(
-          "Marketing API denied access. ${error.describe(nodeForError)}"
+          "Marketing API denied access. ${error.describe(nodeForError)}",
+          nodeForError,
         )
       error?.isInaccessible == true ->
         MetaEntityNotFoundException(
-          "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}"
+          "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}",
+          nodeForError,
         )
-      status == HTTP_NOT_FOUND -> MetaEntityNotFoundException("Meta node $nodeForError not found")
+      status == HTTP_NOT_FOUND ->
+        MetaEntityNotFoundException("Meta node $nodeForError not found", nodeForError)
       error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
       else ->
         MetaApiException(
@@ -573,10 +579,14 @@ class MetaMarketingApiInsightsClient(
       isAuthFailure ->
         MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
       isPermissionDenied ->
-        MetaPermissionDeniedException("Marketing API denied access. ${describe(nodeForError)}")
+        MetaPermissionDeniedException(
+          "Marketing API denied access. ${describe(nodeForError)}",
+          nodeForError,
+        )
       isInaccessible ->
         MetaEntityNotFoundException(
-          "Meta node $nodeForError not found or not accessible. ${describe(nodeForError)}"
+          "Meta node $nodeForError not found or not accessible. ${describe(nodeForError)}",
+          nodeForError,
         )
       else -> MetaApiException(describe(nodeForError))
     }

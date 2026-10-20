@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.Optional
+import kotlin.test.assertFailsWith
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
@@ -82,13 +83,19 @@ class MetaAccountAccessCheckFunctionTest {
     override fun getHeaders(): Map<String, List<String>> = emptyMap()
   }
 
-  /** Minimal [HttpResponse] capturing the status. */
+  /** Minimal [HttpResponse] capturing the status and the text written. */
   private class FakeHttpResponse : HttpResponse {
     var statusCode: Int? = null
       private set
 
     private val output = ByteArrayOutputStream()
     private val writer = output.bufferedWriter()
+
+    val text: String
+      get() {
+        writer.flush()
+        return output.toString(Charsets.UTF_8)
+      }
 
     override fun setStatusCode(code: Int) {
       statusCode = code
@@ -111,22 +118,29 @@ class MetaAccountAccessCheckFunctionTest {
     override fun getWriter(): BufferedWriter = writer
   }
 
-  private fun run(checker: MetaAdAccountAccessChecker, adAccountIds: List<String>): Int? {
+  private fun run(
+    checker: MetaAdAccountAccessChecker,
+    adAccountIds: List<String>,
+  ): FakeHttpResponse {
     val function = MetaAccountAccessCheckFunction(checker, adAccountIds, metrics) { flushes++ }
     val response = FakeHttpResponse()
     function.service(FakeHttpRequest(), response)
-    return response.statusCode
+    return response
   }
 
-  /** Check counts recorded, by attribute set. */
-  private fun recordedChecks(): Map<Attributes, Long> =
+  /** Points of the counter [name], by attribute set. */
+  private fun recorded(name: String): Map<Attributes, Long> =
     metricReader
       .collectAllMetrics()
-      .filter { it.name == "meta.account_access_checks_total" }
+      .filter { it.name == name }
       .flatMap { it.longSumData.points }
       .associate { point: LongPointData -> point.attributes to point.value }
 
-  private fun attributes(
+  private fun recordedChecks() = recorded("meta.account_access.checks")
+
+  private fun recordedRuns() = recorded("meta.account_access.runs")
+
+  private fun check(
     accountId: String,
     result: String,
     errorCode: Long? = null,
@@ -136,53 +150,65 @@ class MetaAccountAccessCheckFunctionTest {
       Attributes.builder()
         .put(MetaAccountAccessMetrics.ACCOUNT_ID, accountId)
         .put(MetaAccountAccessMetrics.RESULT, result)
-    errorCode?.let { builder.put(MetaAccountAccessMetrics.ERROR_CODE, it) }
-    errorSubcode?.let { builder.put(MetaAccountAccessMetrics.ERROR_SUBCODE, it) }
+    if (errorCode != null) builder.put(MetaAccountAccessMetrics.ERROR_CODE, errorCode)
+    if (errorSubcode != null) builder.put(MetaAccountAccessMetrics.ERROR_SUBCODE, errorSubcode)
     return builder.build()
   }
+
+  private fun run(outcome: String): Attributes =
+    Attributes.of(MetaAccountAccessMetrics.OUTCOME, outcome)
 
   @Test
   fun `service records one check per account and responds 200`() {
     val checker =
       FakeAccessChecker(
         mapOf(
-          "111" to MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null),
+          "111" to MetaAdAccountAccess.Accessible,
           "act_222" to
-            MetaAdAccountAccess(MetaAdAccountAccess.Result.PERMISSION_DENIED, 200L, 1815066L),
-          "333" to MetaAdAccountAccess(MetaAdAccountAccess.Result.INACCESSIBLE, 100L, 33L),
+            MetaAdAccountAccess.Refused(
+              MetaAdAccountAccess.Reason.PERMISSION_DENIED,
+              200L,
+              1815066L,
+            ),
+          "333" to MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.INACCESSIBLE, 100L, 33L),
+          "444" to MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.INACCESSIBLE, null, null),
         )
       )
 
-    val status = run(checker, listOf("111", "act_222", "333"))
+    val response = run(checker, listOf("111", "act_222", "333", "444"))
 
-    assertThat(status).isEqualTo(200)
-    assertThat(checker.checked).containsExactly("111", "act_222", "333").inOrder()
+    assertThat(response.statusCode).isEqualTo(200)
+    assertThat(response.text).isEqualTo("Checked 4 ad accounts; 0 failed\n")
+    assertThat(checker.checked).containsExactly("111", "act_222", "333", "444").inOrder()
     assertThat(recordedChecks())
       .containsExactly(
-        attributes("111", "enabled"),
+        check("111", "accessible"),
         1L,
-        attributes("222", "permission_denied", 200L, 1815066L),
+        check("222", "permission_denied", 200L, 1815066L),
         1L,
-        attributes("333", "inaccessible", 100L, 33L),
+        check("333", "inaccessible", 100L, 33L),
+        1L,
+        check("444", "inaccessible"),
         1L,
       )
+    assertThat(recordedRuns()).containsExactly(run("success"), 1L)
     assertThat(flushes).isEqualTo(1)
   }
 
   @Test
-  fun `service checks the remaining accounts when one fails and responds 500`() {
+  fun `service records an account whose check fails and responds 500`() {
     val checker =
       FakeAccessChecker(
-        mapOf(
-          "111" to MetaApiException("unexpected"),
-          "222" to MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null),
-        )
+        mapOf("111" to MetaApiException("unexpected"), "222" to MetaAdAccountAccess.Accessible)
       )
 
-    val status = run(checker, listOf("111", "222"))
+    val response = run(checker, listOf("111", "222"))
 
-    assertThat(status).isEqualTo(500)
-    assertThat(recordedChecks()).containsExactly(attributes("222", "enabled"), 1L)
+    assertThat(response.statusCode).isEqualTo(500)
+    assertThat(response.text).isEqualTo("Checked 2 ad accounts; 1 failed\n")
+    assertThat(recordedChecks())
+      .containsExactly(check("111", "error"), 1L, check("222", "accessible"), 1L)
+    assertThat(recordedRuns()).containsExactly(run("error"), 1L)
     assertThat(flushes).isEqualTo(1)
   }
 
@@ -191,16 +217,18 @@ class MetaAccountAccessCheckFunctionTest {
     val checker =
       FakeAccessChecker(
         mapOf(
-          "111" to MetaAuthException("rejected"),
-          "222" to MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null),
+          "111" to MetaAdAccountAccess.Accessible,
+          "222" to MetaAuthException("rejected"),
+          "333" to MetaAdAccountAccess.Accessible,
         )
       )
 
-    val status = run(checker, listOf("111", "222"))
+    val response = run(checker, listOf("111", "222", "333"))
 
-    assertThat(status).isEqualTo(502)
-    assertThat(checker.checked).containsExactly("111")
-    assertThat(recordedChecks()).isEmpty()
+    assertThat(response.statusCode).isEqualTo(502)
+    assertThat(checker.checked).containsExactly("111", "222").inOrder()
+    assertThat(recordedChecks()).containsExactly(check("111", "accessible"), 1L)
+    assertThat(recordedRuns()).containsExactly(run("auth_failed"), 1L)
     assertThat(flushes).isEqualTo(1)
   }
 
@@ -209,17 +237,37 @@ class MetaAccountAccessCheckFunctionTest {
     val checker =
       FakeAccessChecker(
         mapOf(
-          "111" to MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null),
+          "111" to MetaAdAccountAccess.Accessible,
           "222" to MetaRateLimitException("throttled"),
-          "333" to MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null),
+          "333" to MetaAdAccountAccess.Accessible,
         )
       )
 
-    val status = run(checker, listOf("111", "222", "333"))
+    val response = run(checker, listOf("111", "222", "333"))
 
-    assertThat(status).isEqualTo(429)
+    assertThat(response.statusCode).isEqualTo(429)
     assertThat(checker.checked).containsExactly("111", "222").inOrder()
-    assertThat(recordedChecks()).containsExactly(attributes("111", "enabled"), 1L)
+    assertThat(recordedChecks()).containsExactly(check("111", "accessible"), 1L)
+    assertThat(recordedRuns()).containsExactly(run("rate_limited"), 1L)
     assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `service responds 500 and still flushes on an unexpected exception`() {
+    val checker = FakeAccessChecker(mapOf("111" to IllegalStateException("bug")))
+
+    val response = run(checker, listOf("111"))
+
+    assertThat(response.statusCode).isEqualTo(500)
+    assertThat(recordedChecks()).isEmpty()
+    assertThat(recordedRuns()).containsExactly(run("error"), 1L)
+    assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `constructor rejects an empty account list`() {
+    assertFailsWith<IllegalArgumentException> {
+      MetaAccountAccessCheckFunction(FakeAccessChecker(emptyMap()), emptyList(), metrics) {}
+    }
   }
 }

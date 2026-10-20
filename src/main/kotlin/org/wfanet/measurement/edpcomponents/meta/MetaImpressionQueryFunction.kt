@@ -52,11 +52,11 @@ class MetaImpressionQueryFunction(
 
   /**
    * Builds the function from its environment, as the Functions Framework does. See
-   * [metaMarketingApiClientFromEnvironment] for the Meta credentials.
+   * [MetaEnvironment.marketingApiClient] for the Meta credentials.
    */
   constructor() :
     this(
-      insightsClient = metaMarketingApiClientFromEnvironment(),
+      insightsClient = MetaEnvironment.marketingApiClient(),
       metrics = MetaImpressionQueryMetrics(MetaTelemetry.meter),
       flushTelemetry = { MetaTelemetry.flush() },
     )
@@ -93,13 +93,18 @@ class MetaImpressionQueryFunction(
       // routine while accounts are onboarded and must not look like a credential outage.
       logger.log(Level.WARNING, "Meta denied access to the requested ad account", e)
       outcome = MetaImpressionQueryMetrics.Outcome.PERMISSION_DENIED
+      metrics.recordInaccessibleEntity(
+        MetaImpressionQueryMetrics.InaccessibleReason.PERMISSION_DENIED,
+        entityType,
+        e.nodeId,
+      )
       response.setStatusCode(HTTP_FORBIDDEN)
     } catch (e: Exception) {
       logger.log(Level.SEVERE, "Impression query failed", e)
       outcome = MetaImpressionQueryMetrics.Outcome.ERROR
       response.setStatusCode(HTTP_INTERNAL_SERVER_ERROR)
     } finally {
-      metrics.record(outcome, entityType)
+      metrics.recordQuery(outcome, entityType)
       flushTelemetry()
     }
   }
@@ -150,6 +155,11 @@ class MetaImpressionQueryFunction(
       // Meta reports an account that has not been shared with us the same way as a missing one,
       // so this is often an advertiser not yet onboarded.
       logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
+      metrics.recordInaccessibleEntity(
+        MetaImpressionQueryMetrics.InaccessibleReason.ENTITY_NOT_FOUND,
+        entityTypeLabel(request),
+        e.nodeId,
+      )
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaRateLimitException) {
       // Rethrown rather than skipped so service() can answer with a status; see there.
@@ -200,7 +210,8 @@ class MetaImpressionQueryFunction(
         SkipReason.FILTER_NOT_SUPPORTED -> MetaImpressionQueryMetrics.Outcome.FILTER_NOT_SUPPORTED
         SkipReason.ENTITY_NOT_FOUND -> MetaImpressionQueryMetrics.Outcome.ENTITY_NOT_FOUND
         SkipReason.API_ERROR -> MetaImpressionQueryMetrics.Outcome.API_ERROR
-        else -> MetaImpressionQueryMetrics.Outcome.ERROR
+        SkipReason.SKIP_REASON_UNSPECIFIED,
+        SkipReason.UNRECOGNIZED -> MetaImpressionQueryMetrics.Outcome.ERROR
       }
 
   private fun skip(requestId: String, reason: SkipReason, detail: String) =

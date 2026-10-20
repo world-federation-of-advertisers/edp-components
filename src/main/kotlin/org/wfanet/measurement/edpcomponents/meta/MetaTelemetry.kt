@@ -21,6 +21,7 @@ import io.opentelemetry.sdk.OpenTelemetrySdk
 import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import java.util.logging.Level
 import java.util.logging.Logger
 
 /**
@@ -28,7 +29,7 @@ import java.util.logging.Logger
  * variables. Every exporter defaults to `none`, so nothing is exported unless the deployment opts
  * in, for example with `OTEL_METRICS_EXPORTER=google_cloud_monitoring`.
  */
-object MetaTelemetry {
+internal object MetaTelemetry {
   private val sdk: OpenTelemetrySdk =
     AutoConfiguredOpenTelemetrySdk.builder()
       .addPropertiesSupplier {
@@ -45,23 +46,30 @@ object MetaTelemetry {
   val meter: Meter = sdk.getMeter(INSTRUMENTATION_SCOPE)
 
   /**
-   * Exports pending metrics, returning whether that completed. Cloud Functions may freeze an idle
-   * instance, so a handler calls this before it returns.
+   * Exports pending metrics, returning whether that succeeded. Cloud Functions may freeze an idle
+   * instance, so a handler calls this before it returns. A failure is logged rather than thrown, so
+   * it never replaces the handler's response.
    *
    * Cloud Monitoring accepts one point per time series every 5 seconds, so during a burst it may
-   * reject a flush that closely follows another. Counters are cumulative, so the next accepted
-   * export restores the total.
+   * reject a flush that closely follows another. Counters are cumulative, so a later successful
+   * export, at the next request or when the instance shuts down, carries the full total.
    */
-  fun flush(): Boolean {
-    val result =
-      sdk.sdkMeterProvider.forceFlush().join(FLUSH_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
-    if (!result.isSuccess) {
-      logger.warning("Metric export did not complete within $FLUSH_TIMEOUT")
+  fun flush(): Boolean =
+    try {
+      val result =
+        sdk.sdkMeterProvider.forceFlush().join(FLUSH_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+      if (!result.isSuccess) {
+        logger.warning("Metric export failed or did not complete within $FLUSH_TIMEOUT")
+      }
+      result.isSuccess
+    } catch (e: Exception) {
+      logger.log(Level.WARNING, "Metric export failed", e)
+      false
     }
-    return result.isSuccess
-  }
 
   private const val INSTRUMENTATION_SCOPE = "org.wfanet.measurement.edpcomponents.meta"
-  private val FLUSH_TIMEOUT: Duration = Duration.ofSeconds(5)
+  // Short, because the flush runs inside the function's request timeout: a slow export must not
+  // turn a meaningful 429 or 502 into a timeout for the caller.
+  private val FLUSH_TIMEOUT: Duration = Duration.ofSeconds(2)
   private val logger: Logger = Logger.getLogger(MetaTelemetry::class.java.name)
 }

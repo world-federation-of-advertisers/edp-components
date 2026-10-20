@@ -70,11 +70,10 @@ class MetaAdAccountAccessCheckTest {
   }
 
   @Test
-  fun `checkAdAccountAccess returns ENABLED when the account is readable`() {
+  fun `checkAdAccountAccess returns Accessible when the account is readable`() {
     val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
 
-    assertThat(access)
-      .isEqualTo(MetaAdAccountAccess(MetaAdAccountAccess.Result.ENABLED, null, null))
+    assertThat(access).isEqualTo(MetaAdAccountAccess.Accessible)
     val uri = requestUris.single()
     assertThat(uri.path).isEqualTo("/$API_VERSION/act_$AD_ACCOUNT_ID")
     assertThat(uri.query).contains("fields=id")
@@ -96,7 +95,9 @@ class MetaAdAccountAccessCheckTest {
     val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
 
     assertThat(access)
-      .isEqualTo(MetaAdAccountAccess(MetaAdAccountAccess.Result.PERMISSION_DENIED, 200L, 1815066L))
+      .isEqualTo(
+        MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.PERMISSION_DENIED, 200L, 1815066L)
+      )
   }
 
   @Test
@@ -106,7 +107,9 @@ class MetaAdAccountAccessCheckTest {
     val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
 
     assertThat(access)
-      .isEqualTo(MetaAdAccountAccess(MetaAdAccountAccess.Result.PERMISSION_DENIED, 10L, null))
+      .isEqualTo(
+        MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.PERMISSION_DENIED, 10L, null)
+      )
   }
 
   @Test
@@ -117,7 +120,7 @@ class MetaAdAccountAccessCheckTest {
     val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
 
     assertThat(access)
-      .isEqualTo(MetaAdAccountAccess(MetaAdAccountAccess.Result.INACCESSIBLE, 100L, 33L))
+      .isEqualTo(MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.INACCESSIBLE, 100L, 33L))
   }
 
   @Test
@@ -128,7 +131,18 @@ class MetaAdAccountAccessCheckTest {
     val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
 
     assertThat(access)
-      .isEqualTo(MetaAdAccountAccess(MetaAdAccountAccess.Result.INACCESSIBLE, null, null))
+      .isEqualTo(MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.INACCESSIBLE, null, null))
+  }
+
+  @Test
+  fun `checkAdAccountAccess returns INACCESSIBLE with the code of an unclassified 404 error`() {
+    status = 404
+    body = errorBody(code = 100, subcode = 2)
+
+    val access = newClient().checkAdAccountAccess(AD_ACCOUNT_ID)
+
+    assertThat(access)
+      .isEqualTo(MetaAdAccountAccess.Refused(MetaAdAccountAccess.Reason.INACCESSIBLE, 100L, 2L))
   }
 
   @Test
@@ -148,13 +162,57 @@ class MetaAdAccountAccessCheckTest {
   }
 
   @Test
+  fun `checkAdAccountAccess throws MetaRateLimitException for a throttle embedded in a 200`() {
+    body = errorBody(code = 4)
+
+    assertFailsWith<MetaRateLimitException> { newClient().checkAdAccountAccess(AD_ACCOUNT_ID) }
+  }
+
+  @Test
+  fun `checkAdAccountAccess throws MetaRateLimitException for a throttle on a 404`() {
+    status = 404
+    body = errorBody(code = 80004)
+
+    assertFailsWith<MetaRateLimitException> { newClient().checkAdAccountAccess(AD_ACCOUNT_ID) }
+  }
+
+  @Test
   fun `checkAdAccountAccess throws MetaApiException for an unclassified error`() {
     status = 500
     body = errorBody(code = 1)
 
     val exception =
       assertFailsWith<MetaApiException> { newClient().checkAdAccountAccess(AD_ACCOUNT_ID) }
-    assertThat(exception).isNotInstanceOf(MetaPermissionDeniedException::class.java)
+    assertThat(exception::class).isEqualTo(MetaApiException::class)
+  }
+
+  @Test
+  fun `checkAdAccountAccess throws MetaApiException for an unclassified error embedded in a 200`() {
+    // Treating this as accessible would be a silent wrong answer.
+    body = errorBody(code = 1)
+
+    val exception =
+      assertFailsWith<MetaApiException> { newClient().checkAdAccountAccess(AD_ACCOUNT_ID) }
+    assertThat(exception::class).isEqualTo(MetaApiException::class)
+  }
+
+  @Test
+  fun `checkAdAccountAccess throws MetaApiException for an error status with no body`() {
+    status = 503
+    body = ""
+
+    val exception =
+      assertFailsWith<MetaApiException> { newClient().checkAdAccountAccess(AD_ACCOUNT_ID) }
+    assertThat(exception::class).isEqualTo(MetaApiException::class)
+  }
+
+  @Test
+  fun `checkAdAccountAccess throws MetaApiException when Meta cannot be reached`() {
+    val client = newClient()
+    server.stop(0)
+
+    val exception = assertFailsWith<MetaApiException> { client.checkAdAccountAccess(AD_ACCOUNT_ID) }
+    assertThat(exception::class).isEqualTo(MetaApiException::class)
   }
 
   companion object {

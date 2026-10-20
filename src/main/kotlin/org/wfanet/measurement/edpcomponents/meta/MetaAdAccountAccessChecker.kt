@@ -30,23 +30,28 @@ interface MetaAdAccountAccessChecker {
 }
 
 /** Outcome of one ad account access check. */
-data class MetaAdAccountAccess(
-  val result: Result,
-  /** Meta's error `code` when the check was refused, otherwise null. */
-  val errorCode: Long?,
-  /** Meta's `error_subcode` when the check was refused and Meta supplied one, otherwise null. */
-  val errorSubcode: Long?,
-) {
-  /** The access state of an ad account, with the label it is recorded under. */
-  enum class Result(val label: String) {
-    /** The credentials can read the account. */
-    ENABLED("enabled"),
+sealed interface MetaAdAccountAccess {
+  /**
+   * The credentials can read the account. This says nothing about Meta's `account_status`: a
+   * disabled or closed account is still readable.
+   */
+  data object Accessible : MetaAdAccountAccess
+
+  /**
+   * Meta refused the read for [reason], with its error `code` and `error_subcode` when it supplied
+   * them. Both are null for a bare HTTP 404.
+   */
+  data class Refused(val reason: Reason, val errorCode: Long?, val errorSubcode: Long?) :
+    MetaAdAccountAccess
+
+  /** Why Meta refused an ad account read. */
+  enum class Reason {
     /** The token is valid but has not been granted the account: error `code` 10 or 200–299. */
-    PERMISSION_DENIED("permission_denied"),
+    PERMISSION_DENIED,
     /**
      * The account does not exist or the token cannot reach it: error `code` 100 with subcode 33,
      * which Meta uses for both, or HTTP 404.
      */
-    INACCESSIBLE("inaccessible"),
+    INACCESSIBLE,
   }
 }

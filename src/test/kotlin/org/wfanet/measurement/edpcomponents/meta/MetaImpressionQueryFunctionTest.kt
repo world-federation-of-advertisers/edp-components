@@ -22,6 +22,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.protobuf.timestamp
 import com.google.type.Interval
 import com.google.type.interval
+import io.opentelemetry.api.common.Attributes
 import io.opentelemetry.sdk.metrics.SdkMeterProvider
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader
 import java.io.BufferedReader
@@ -57,7 +58,7 @@ class MetaImpressionQueryFunctionTest {
   private fun recordedQueries(): Map<Pair<String?, String?>, Long> =
     metricReader
       .collectAllMetrics()
-      .filter { it.name == "meta.impression_queries_total" }
+      .filter { it.name == "meta.impression_query.queries" }
       .flatMap { it.longSumData.points }
       .associate { point ->
         Pair(
@@ -65,6 +66,14 @@ class MetaImpressionQueryFunctionTest {
           point.attributes.get(MetaImpressionQueryMetrics.ENTITY_TYPE),
         ) to point.value
       }
+
+  /** Points of `meta.impression_query.inaccessible_entities`, by attribute set. */
+  private fun recordedInaccessibleEntities(): Map<Attributes, Long> =
+    metricReader
+      .collectAllMetrics()
+      .filter { it.name == "meta.impression_query.inaccessible_entities" }
+      .flatMap { it.longSumData.points }
+      .associate { point -> point.attributes to point.value }
 
   private fun serve(insightsClient: MetaInsightsClient, body: ByteArray): FakeHttpResponse {
     val httpResponse = FakeHttpResponse()
@@ -216,7 +225,9 @@ class MetaImpressionQueryFunctionTest {
     // and must not read as a credential outage.
     val httpResponse = FakeHttpResponse()
 
-    newFunction(FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access")))
+    newFunction(
+        FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "act_999"))
+      )
       .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
 
     assertThat(httpResponse.statusCode).isEqualTo(403)
@@ -300,7 +311,7 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `skips with ENTITY_NOT_FOUND when the client cannot find the entity`() {
     val response =
-      newFunction(FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope")))
+      newFunction(FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")))
         .handle(request(entityIds = listOf("111")))
 
     assertThat(response.hasSkipped()).isTrue()
@@ -328,23 +339,43 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `service records an entity Meta cannot find or the token cannot see`() {
     serve(
-      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope")),
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
       request(entityType = "ad_set", entityIds = listOf("111")).toByteArray(),
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("entity_not_found", "adset"), 1L)
+    assertThat(recordedInaccessibleEntities())
+      .containsExactly(
+        Attributes.builder()
+          .put(MetaImpressionQueryMetrics.REASON, "entity_not_found")
+          .put(MetaImpressionQueryMetrics.ENTITY_TYPE, "adset")
+          .put(MetaImpressionQueryMetrics.NODE_ID, "111")
+          .build(),
+        1L,
+      )
   }
 
   @Test
   fun `service records a query refused for lack of permission`() {
     val httpResponse =
       serve(
-        FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access")),
+        FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "act_999")),
         request(entityIds = listOf("111")).toByteArray(),
       )
 
     assertThat(httpResponse.statusCode).isEqualTo(403)
     assertThat(recordedQueries()).containsExactly(Pair("permission_denied", "campaign"), 1L)
+    // The refused node is an ad account, so its ID is recorded too.
+    assertThat(recordedInaccessibleEntities())
+      .containsExactly(
+        Attributes.builder()
+          .put(MetaImpressionQueryMetrics.REASON, "permission_denied")
+          .put(MetaImpressionQueryMetrics.ENTITY_TYPE, "campaign")
+          .put(MetaImpressionQueryMetrics.NODE_ID, "act_999")
+          .put(MetaImpressionQueryMetrics.ACCOUNT_ID, "999")
+          .build(),
+        1L,
+      )
     assertThat(flushes).isEqualTo(1)
   }
 
@@ -364,6 +395,104 @@ class MetaImpressionQueryFunctionTest {
 
     assertThat(recordedQueries()).containsExactly(Pair("error", "unknown"), 1L)
     assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `service records a throttled query`() {
+    serve(
+      FakeMetaInsightsClient(throwable = MetaRateLimitException("throttled")),
+      request(entityIds = listOf("111")).toByteArray(),
+    )
+
+    assertThat(recordedQueries()).containsExactly(Pair("rate_limited", "campaign"), 1L)
+    assertThat(recordedInaccessibleEntities()).isEmpty()
+    assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `service records a query whose credentials Meta rejected`() {
+    serve(
+      FakeMetaInsightsClient(throwable = MetaAuthException("expired")),
+      request(entityIds = listOf("111")).toByteArray(),
+    )
+
+    assertThat(recordedQueries()).containsExactly(Pair("auth_failed", "campaign"), 1L)
+    assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `service records a Marketing API failure`() {
+    serve(
+      FakeMetaInsightsClient(throwable = MetaApiException("boom")),
+      request(entityIds = listOf("111")).toByteArray(),
+    )
+
+    assertThat(recordedQueries()).containsExactly(Pair("api_error", "campaign"), 1L)
+  }
+
+  @Test
+  fun `service records entities at several levels as mixed`() {
+    val mixed =
+      request(entityIds = listOf("111"))
+        .toBuilder()
+        .apply {
+          queryBuilder.addEntityKeys(
+            entityKey {
+              entityType = "ad_set"
+              entityId = "222"
+            }
+          )
+        }
+        .build()
+
+    serve(FakeMetaInsightsClient(result = 1L), mixed.toByteArray())
+
+    assertThat(recordedQueries()).containsExactly(Pair("success", "mixed"), 1L)
+  }
+
+  @Test
+  fun `service records a request naming no entities as unknown`() {
+    serve(FakeMetaInsightsClient(result = 1L), request(entityIds = emptyList()).toByteArray())
+
+    assertThat(recordedQueries()).containsExactly(Pair("success", "unknown"), 1L)
+  }
+
+  @Test
+  fun `service records an error when writing the response fails`() {
+    val httpResponse = UnwritableHttpResponse()
+
+    newFunction(FakeMetaInsightsClient(result = 1L))
+      .service(FakeHttpRequest(request(entityIds = listOf("111")).toByteArray()), httpResponse)
+
+    assertThat(httpResponse.statusCode).isEqualTo(500)
+    assertThat(recordedQueries()).containsExactly(Pair("error", "campaign"), 1L)
+    assertThat(flushes).isEqualTo(1)
+  }
+
+  /** [HttpResponse] whose body cannot be written; captures the status. */
+  private class UnwritableHttpResponse : HttpResponse {
+    var statusCode: Int? = null
+      private set
+
+    override fun setStatusCode(code: Int) {
+      statusCode = code
+    }
+
+    override fun setStatusCode(code: Int, message: String) {
+      statusCode = code
+    }
+
+    override fun setContentType(contentType: String) {}
+
+    override fun getContentType(): Optional<String> = Optional.empty()
+
+    override fun appendHeader(header: String, value: String) {}
+
+    override fun getHeaders(): Map<String, List<String>> = emptyMap()
+
+    override fun getOutputStream(): OutputStream = throw java.io.IOException("connection reset")
+
+    override fun getWriter(): BufferedWriter = throw java.io.IOException("connection reset")
   }
 
   private fun request(

@@ -199,33 +199,46 @@ For a throwaway dev deployment, `--set-env-vars=META_ACCESS_TOKEN=...,META_APP_S
 provisioning Secret Manager. Never do this outside a disposable test project: the values are
 visible in the function's configuration.
 
-Managed deployment (Terraform, mirroring the `http-cloud-function` module used by the EDP
-Aggregator functions) is not wired up yet.
+Managed deployment lives in cross-media-measurement's Terraform: the edp-aggregator module deploys
+both functions with its `http-cloud-function` module, from the version pinned in each environment's
+tfvars.
 
 ## Metrics
 
-`MetaImpressionQueryFunction` records each query in the `meta.impression_queries_total` counter,
+`MetaImpressionQueryFunction` records each query in the `meta.impression_query.queries` counter,
 with attributes `outcome` (`success`, a skip reason such as `entity_not_found`, or
 `permission_denied`, `rate_limited`, `auth_failed` or `error`) and `entity_type` (the Meta level
-queried). Meta reports an ad account that has not been shared with us the same way as a missing
-one, so `entity_not_found` and `permission_denied` usually mean an advertiser is not yet onboarded.
-Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME`, and grant the
-service account `roles/monitoring.metricWriter`, to export it.
+queried). A query Meta refuses for lack of access is also recorded in
+`meta.impression_query.inaccessible_entities`, with `reason` (`entity_not_found` or
+`permission_denied`), `entity_type`, `node_id` (the Graph node refused) and, when that node is an
+ad account, `account_id`. Meta reports an ad account that has not been shared with us the same way
+as a missing one and does not name the account behind a hidden campaign, so the node is often the
+only identifier available; these usually mean an advertiser is not yet onboarded.
+
+Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME` (for example
+`meta.impression_query`), and grant the service account `roles/monitoring.metricWriter`, to export
+them. OpenTelemetry exporters default to `none`, so without `OTEL_METRICS_EXPORTER` nothing is
+exported. The metric names and attributes are also used by cross-media-measurement's
+`meta_impression_query_dashboard.json`; change both together.
 
 ## Ad account access check
 
 `MetaAccountAccessCheckFunction` ships in the same jar. Cloud Scheduler calls it hourly; it reads
-each ad account in `META_EXPECTED_AD_ACCOUNT_IDS` (comma-separated) with `GET act_<id>?fields=id`
-and records the outcome in the `meta.account_access_checks_total` counter, with attributes
-`account_id`, `result` (`enabled`, `permission_denied` or `inaccessible`) and, for a refusal,
-Meta's `error_code` and `error_subcode`. That shows which advertisers are onboarded before any
-report queries them. It makes no Insights calls, and the impression query never calls it.
+each ad account in `META_EXPECTED_AD_ACCOUNT_IDS` (comma-separated, with or without `act_`) with
+`GET act_<id>?fields=id`. Each check is recorded in `meta.account_access.checks`, with attributes
+`account_id`, `result` (`accessible`, `permission_denied`, `inaccessible` or `error`) and, for a
+refusal, Meta's `error_code` and `error_subcode`. Each run is recorded in
+`meta.account_access.runs` with an `outcome` (`success`, `auth_failed`, `rate_limited` or
+`error`). That shows which advertisers are onboarded before any report queries them. `accessible`
+means the credentials can read the account, not that Meta's `account_status` is active. It makes
+no Insights calls, and the impression query never calls it.
 
 Deploy it like the impression query, with
 `--entry-point=org.wfanet.measurement.edpcomponents.meta.MetaAccountAccessCheckFunction`, the same
-two secrets, and `--set-env-vars=META_EXPECTED_AD_ACCOUNT_IDS=...,OTEL_METRICS_EXPORTER=google_cloud_monitoring,OTEL_SERVICE_NAME=meta-account-access-check`.
-Its service account needs `roles/monitoring.metricWriter`. OpenTelemetry exporters default to
-`none`, so without `OTEL_METRICS_EXPORTER` nothing is exported.
+two secrets, and `META_EXPECTED_AD_ACCOUNT_IDS`, `OTEL_METRICS_EXPORTER=google_cloud_monitoring`
+and `OTEL_SERVICE_NAME=meta.account_access_check`. Because `--set-env-vars` splits on commas, pass
+the account list with an alternate delimiter (see `gcloud topic escaping`). An empty list fails at
+startup. Its service account needs `roles/monitoring.metricWriter`.
 
 It responds 200 when every account was checked, whatever the results; 502 when Meta rejects the
 credentials; 429 when Meta throttles; and 500 when any other check failed.
@@ -242,5 +255,4 @@ Open TODOs (tracked in code):
   alongside `age` or `gender`, so a filtered interval needing hourly boundary queries cannot be
   answered at all (world-federation-of-advertisers/edp-components#16).
 - **Async Insights** report-run path for large queries.
-- **Terraform deploy config** — the `java_binary` exists (see above); managed deployment does not.
 - **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.
