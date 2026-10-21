@@ -9,7 +9,7 @@ matching this filter?" — nothing more. All comparison/verdict logic lives in R
 ## Contract
 
 - **Request** `DataProviderImpressionQueryRequest` (binary proto): `request_id`, `data_provider`,
-  `query { entity_keys[], time_interval, filter.expression (CEL) }`.
+  `query { event_groups[], time_interval, filter.expression (CEL) }`.
 - **Response** `DataProviderImpressionQueryResponse`: `request_id` + `oneof { result (ImpressionCount)
   | skipped (SkipDetail{reason, detail}) }`.
 - **Skip reasons**: `FILTER_NOT_SUPPORTED`, `ENTITY_NOT_FOUND`, `API_ERROR`.
@@ -21,7 +21,7 @@ Bazel registry).
 ## Flow
 
 1. Parse the binary-proto request.
-2. `MetaEntityLevels` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
+2. `MetaEntityLevels` — route each EventGroup's `entity_key` by `entity_type` to a Graph node ID and Insights
    `level`: `campaign`, `ad`/`creative` → `ad`, `ad_set`/`adset` → `adset`, `account`/`ad_account` →
    `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
@@ -214,8 +214,8 @@ Each query also records the access it observed to its ad accounts in the
 `meta.account_access.last_observed` gauge: the time, in seconds since the epoch, each
 (`account_id`, `result`) pair was last seen, where `result` is `accessible`, `permission_denied` or
 `inaccessible`. An account's current access is the result with the latest time. An account is known
-from an account-level entity, or from the `ad_account_id` string in an entity's `entity_metadata`,
-which Results Fulfiller copies from the `EventGroup`; Meta does not name the account behind a
+from an account-level entity, or from the `ad_account_id` string in the `entity_metadata` of each
+EventGroup in the request; Meta does not name the account behind a
 campaign it hides, so that metadata is what attributes a refusal. Throttles, rejected credentials
 and other failures leave an account's access unchanged, and an account no report has queried yet
 has no points. Refusals are not cached, so a denied account is queried again on its next report and

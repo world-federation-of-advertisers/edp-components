@@ -41,7 +41,8 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
-import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.EventGroup
+import org.wfanet.measurement.api.v2alpha.EventGroupMetadata
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.eventFilter
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
@@ -293,6 +294,28 @@ class MetaImpressionQueryFunctionTest {
   }
 
   @Test
+  fun `skips with FILTER_NOT_SUPPORTED for an EventGroup without an entity key`() {
+    val fake = FakeMetaInsightsClient(result = 1L)
+    val noEntityKey =
+      request(entityIds = listOf("111"))
+        .toBuilder()
+        .apply {
+          queryBuilder.setEventGroups(
+            0,
+            EventGroup.newBuilder().setName("dataProviders/edp-meta/eventGroups/legacy"),
+          )
+        }
+        .build()
+
+    val response = newFunction(fake).handle(noEntityKey)
+
+    assertThat(response.hasSkipped()).isTrue()
+    assertThat(response.skipped.reason).isEqualTo(SkipReason.FILTER_NOT_SUPPORTED)
+    assertThat(response.skipped.detail).contains("eventGroups/legacy")
+    assertThat(fake.lastTargets).isNull()
+  }
+
+  @Test
   fun `skips with FILTER_NOT_SUPPORTED for an unsupported entity_type without calling the client`() {
     val fake = FakeMetaInsightsClient(result = 1L)
 
@@ -380,12 +403,7 @@ class MetaImpressionQueryFunctionTest {
       request(entityIds = listOf("111"), adAccountId = "999")
         .toBuilder()
         .apply {
-          queryBuilder.addEntityKeys(
-            entityKey {
-              entityType = "ad_account"
-              entityId = "888"
-            }
-          )
+          queryBuilder.addEventGroups(eventGroup(entityType = "ad_account", entityId = "888"))
         }
         .build()
 
@@ -417,10 +435,17 @@ class MetaImpressionQueryFunctionTest {
       request(entityIds = listOf("111"))
         .toBuilder()
         .apply {
-          queryBuilder.entityKeysBuilderList.single().entityMetadata =
-            Struct.newBuilder()
-              .putFields("ad_account_id", Value.newBuilder().setNumberValue(999.0).build())
-              .build()
+          queryBuilder.setEventGroups(
+            0,
+            eventGroup(
+              entityType = "campaign",
+              entityId = "111",
+              entityMetadata =
+                Struct.newBuilder()
+                  .putFields("ad_account_id", Value.newBuilder().setNumberValue(999.0).build())
+                  .build(),
+            ),
+          )
         }
         .build()
 
@@ -488,14 +513,7 @@ class MetaImpressionQueryFunctionTest {
     val mixed =
       request(entityIds = listOf("111"))
         .toBuilder()
-        .apply {
-          queryBuilder.addEntityKeys(
-            entityKey {
-              entityType = "ad_set"
-              entityId = "222"
-            }
-          )
-        }
+        .apply { queryBuilder.addEventGroups(eventGroup(entityType = "ad_set", entityId = "222")) }
         .build()
 
     serve(FakeMetaInsightsClient(result = 1L), mixed.toByteArray())
@@ -558,16 +576,20 @@ class MetaImpressionQueryFunctionTest {
     dataProvider = "dataProviders/edp-meta"
     query = impressionQuery {
       for (id in entityIds) {
-        entityKeys += entityKey {
-          this.entityType = entityType
-          entityId = id
-          if (adAccountId != null) {
+        eventGroups +=
+          eventGroup(
+            entityType = entityType,
+            entityId = id,
             entityMetadata =
-              Struct.newBuilder()
-                .putFields("ad_account_id", Value.newBuilder().setStringValue(adAccountId).build())
-                .build()
-          }
-        }
+              if (adAccountId == null) null
+              else
+                Struct.newBuilder()
+                  .putFields(
+                    "ad_account_id",
+                    Value.newBuilder().setStringValue(adAccountId).build(),
+                  )
+                  .build(),
+          )
       }
       timeInterval = interval {
         startTime = timestamp { seconds = 1_700_000_000 }
@@ -575,6 +597,25 @@ class MetaImpressionQueryFunctionTest {
       }
       this.filter = eventFilter { expression = filter }
     }
+  }
+
+  /** An [EventGroup] for the given entity, whose metadata carries [entityMetadata] if not null. */
+  private fun eventGroup(
+    entityType: String,
+    entityId: String,
+    entityMetadata: Struct? = null,
+  ): EventGroup {
+    val builder =
+      EventGroup.newBuilder()
+        .setEntityKey(
+          EventGroup.EntityKey.newBuilder().setEntityType(entityType).setEntityId(entityId)
+        )
+    if (entityMetadata != null) {
+      builder.setEventGroupMetadata(
+        EventGroupMetadata.newBuilder().setEntityMetadata(entityMetadata)
+      )
+    }
+    return builder.build()
   }
 
   companion object {

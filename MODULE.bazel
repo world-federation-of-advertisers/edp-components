@@ -15,10 +15,10 @@ bazel_dep(
 )
 
 # TODO(world-federation-of-advertisers/cross-media-measurement-api#311): Replace with the released
-#   version that adds ImpressionQuery.EntityKey.entity_metadata.
+#   version that replaces ImpressionQuery.entity_keys with event_groups.
 git_override(
     module_name = "cross-media-measurement-api",
-    commit = "c6e4f5235936770158bb559b1e2e830b042a0c3e",
+    commit = "cb0825e2b2c764ea499184c376b60cca2476ff86",
     remote = "https://github.com/world-federation-of-advertisers/cross-media-measurement-api.git",
 )
 

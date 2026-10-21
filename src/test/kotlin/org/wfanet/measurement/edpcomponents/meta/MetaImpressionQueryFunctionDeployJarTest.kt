@@ -31,7 +31,7 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
-import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.EventGroup
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.eventFilter
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
@@ -109,10 +109,12 @@ class MetaImpressionQueryFunctionDeployJarTest {
       requestId = REQUEST_ID
       dataProvider = "dataProviders/edp-meta"
       query = impressionQuery {
-        entityKeys += entityKey {
-          entityType = "campaign"
-          entityId = "111"
-        }
+        eventGroups +=
+          EventGroup.newBuilder()
+            .setEntityKey(
+              EventGroup.EntityKey.newBuilder().setEntityType("campaign").setEntityId("111")
+            )
+            .build()
         timeInterval = interval {
           startTime = timestamp { seconds = 1_700_000_000 }
           endTime = timestamp { seconds = 1_700_086_400 }

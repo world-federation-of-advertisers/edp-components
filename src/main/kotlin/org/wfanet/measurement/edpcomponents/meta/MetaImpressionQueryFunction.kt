@@ -35,10 +35,10 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * 2).
  *
  * A **dumb publisher-API adapter** (design doc §7): it parses a
- * [DataProviderImpressionQueryRequest] (binary proto), routes each entity key to a Meta Insights
- * target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to a Meta
- * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
- * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
+ * [DataProviderImpressionQueryRequest] (binary proto), routes each EventGroup's entity key to a
+ * Meta Insights target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to
+ * a Meta demographic breakdown, queries the Marketing API Insights endpoint for the raw impression
+ * count over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
  * comparison, no verdict, and no callback — that all lives in Results Fulfiller's
  * `EdpValidationPostProcessor`.
  *
@@ -49,10 +49,10 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * Each query also records the access it observed to the ad accounts involved (see
  * [MetaImpressionQueryMetrics.recordAccountAccess]), so onboarding gaps show per account without a
  * separate check. An account is known from an account-level entity, or from the `ad_account_id`
- * string in an entity's `entity_metadata`, which Results Fulfiller copies from the `EventGroup`.
- * Meta does not name the account behind a campaign it hides, so that metadata is what attributes a
- * refusal to an account. Refusals are never cached: a denied account is queried again on its next
- * report, so newly granted access is observed.
+ * string in the `entity_metadata` of each EventGroup's `event_group_metadata`. Meta does not name
+ * the account behind a campaign it hides, so that metadata is what attributes a refusal to an
+ * account. Refusals are never cached: a denied account is queried again on its next report, so
+ * newly granted access is observed.
  */
 class MetaImpressionQueryFunction(
   private val insightsClient: MetaInsightsClient,
@@ -127,11 +127,19 @@ class MetaImpressionQueryFunction(
             request.query.filter.expression,
         )
 
-    // Route each entity to its Meta Insights target by entity_type. An unsupported type skips the
-    // whole request: a partial sum over only the supported entities would be a wrong number, not a
-    // valid smaller one.
-    val targets = ArrayList<MetaInsightsTarget>(request.query.entityKeysList.size)
-    for (entityKey in request.query.entityKeysList) {
+    // Route each EventGroup's entity to its Meta Insights target by entity_type. An unsupported or
+    // missing entity key skips the whole request: a partial sum over only the supported entities
+    // would be a wrong number, not a valid smaller one.
+    val targets = ArrayList<MetaInsightsTarget>(request.query.eventGroupsList.size)
+    for (eventGroup in request.query.eventGroupsList) {
+      if (!eventGroup.hasEntityKey()) {
+        return skip(
+          request.requestId,
+          SkipReason.FILTER_NOT_SUPPORTED,
+          "EventGroup ${eventGroup.name} has no entity_key",
+        )
+      }
+      val entityKey = eventGroup.entityKey
       val entityLevel =
         MetaEntityLevels[entityKey.entityType]
           ?: return skip(
@@ -145,7 +153,6 @@ class MetaImpressionQueryFunction(
           level = entityLevel.level,
         )
     }
-
     return try {
       val count = insightsClient.queryImpressions(targets, request.query.timeInterval, demographics)
       recordAccountAccess(request, MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE, null)
@@ -210,12 +217,13 @@ class MetaImpressionQueryFunction(
     refusedNodeId: String?,
   ) {
     val accountIdByEntityId: Map<String, String> =
-      request.query.entityKeysList
-        .mapNotNull { entityKey ->
+      request.query.eventGroupsList
+        .mapNotNull { eventGroup ->
+          val entityKey = eventGroup.entityKey
           val accountId =
             if (MetaEntityLevels[entityKey.entityType]?.level == ACCOUNT_LEVEL) entityKey.entityId
             else
-              entityKey.entityMetadata.fieldsMap[AD_ACCOUNT_ID_FIELD]
+              eventGroup.eventGroupMetadata.entityMetadata.fieldsMap[AD_ACCOUNT_ID_FIELD]
                 ?.takeIf { it.kindCase == Value.KindCase.STRING_VALUE }
                 ?.stringValue
           accountId
@@ -240,8 +248,8 @@ class MetaImpressionQueryFunction(
   /** The [MetaImpressionQueryMetrics.ENTITY_TYPE] label for [request]'s entities. */
   private fun entityTypeLabel(request: DataProviderImpressionQueryRequest): String {
     val levels =
-      request.query.entityKeysList
-        .map { MetaEntityLevels[it.entityType]?.level ?: UNSUPPORTED_ENTITY_TYPE }
+      request.query.eventGroupsList
+        .map { MetaEntityLevels[it.entityKey.entityType]?.level ?: UNSUPPORTED_ENTITY_TYPE }
         .distinct()
     return when {
       levels.isEmpty() -> UNKNOWN_ENTITY_TYPE
@@ -277,7 +285,7 @@ class MetaImpressionQueryFunction(
     private const val UNKNOWN_ENTITY_TYPE = "unknown"
     private const val ACCOUNT_LEVEL = "account"
     private const val ACCOUNT_PREFIX = "act_"
-    // Key in an entity's `entity_metadata` naming the ad account that owns it.
+    // Key in an EventGroup's `entity_metadata` naming the ad account that owns the entity.
     private const val AD_ACCOUNT_ID_FIELD = "ad_account_id"
     private const val UNSUPPORTED_ENTITY_TYPE = "unsupported"
     private const val MIXED_ENTITY_TYPE = "mixed"
