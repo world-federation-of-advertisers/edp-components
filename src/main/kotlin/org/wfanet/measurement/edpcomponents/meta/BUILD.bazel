@@ -15,9 +15,6 @@ kt_jvm_proto_library(
 kt_jvm_library(
     name = "meta_impression_query",
     srcs = [
-        "MetaAccountAccessCheckFunction.kt",
-        "MetaAccountAccessMetrics.kt",
-        "MetaAdAccountAccessChecker.kt",
         "MetaEntityLevel.kt",
         "MetaEnvironment.kt",
         "MetaImpressionQueryFunction.kt",
@@ -41,8 +38,7 @@ kt_jvm_library(
     ],
 )
 
-# Gen-2 deployable artifact, serving both MetaImpressionQueryFunction and
-# MetaAccountAccessCheckFunction. See README.md for the deploy procedure.
+# Gen-2 deployable artifact. See README.md for the deploy procedure.
 java_binary(
     name = "MetaImpressionQueryFunction",
     main_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunction",

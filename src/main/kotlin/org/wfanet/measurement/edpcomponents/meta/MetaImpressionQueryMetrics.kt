@@ -19,17 +19,17 @@ package org.wfanet.measurement.edpcomponents.meta
 import io.opentelemetry.api.common.AttributeKey
 import io.opentelemetry.api.common.Attributes
 import io.opentelemetry.api.metrics.LongCounter
+import io.opentelemetry.api.metrics.LongGauge
 import io.opentelemetry.api.metrics.Meter
+import java.time.Instant
 
 /**
  * Metrics for [MetaImpressionQueryFunction]:
  * - `meta.impression_query.queries`, one per query, keyed by [OUTCOME] and [ENTITY_TYPE].
- * - `meta.impression_query.inaccessible_entities`, one per query Meta refused for lack of access,
- *   keyed by [REASON], [ENTITY_TYPE], [NODE_ID] and, when the refused node is an ad account,
- *   [ACCOUNT_ID]. Meta reports an ad account that has not been shared with us the same way as a
- *   missing one and does not name the account behind a hidden campaign, so the node is often the
- *   only identifier available. Unlike the hourly account check, this covers every entity a report
- *   asks about, including those in accounts no one listed.
+ * - `meta.account_access.last_observed`, a gauge holding when each ([ACCOUNT_ID], [RESULT]) pair
+ *   was last observed, in seconds since the epoch. An account's current access is the result with
+ *   the latest time. It is updated only when a report queries the account, so an account no report
+ *   has queried has no points yet.
  *
  * The names and attributes are also used by the Meta impression-query dashboard in
  * cross-media-measurement (`meta_impression_query_dashboard.json`); change both together.
@@ -42,11 +42,12 @@ class MetaImpressionQueryMetrics(meter: Meter) {
       .setUnit("{query}")
       .build()
 
-  private val inaccessibleEntities: LongCounter =
+  private val accountAccessLastObserved: LongGauge =
     meter
-      .counterBuilder("meta.impression_query.inaccessible_entities")
-      .setDescription("Meta impression queries refused for lack of access, by Meta node")
-      .setUnit("{query}")
+      .gaugeBuilder("meta.account_access.last_observed")
+      .ofLongs()
+      .setDescription("When each Meta ad account access result was last observed")
+      .setUnit("s")
       .build()
 
   /** Records one query with [outcome] for entities of [entityType]. */
@@ -54,20 +55,12 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     queries.add(1, Attributes.of(OUTCOME, outcome.label, ENTITY_TYPE, entityType))
   }
 
-  /**
-   * Records a query for entities of [entityType] that Meta refused for [reason] at Graph node
-   * [nodeId].
-   */
-  fun recordInaccessibleEntity(reason: InaccessibleReason, entityType: String, nodeId: String) {
-    val attributes =
-      Attributes.builder()
-        .put(REASON, reason.label)
-        .put(ENTITY_TYPE, entityType)
-        .put(NODE_ID, nodeId)
-    if (nodeId.startsWith(ACCOUNT_PREFIX)) {
-      attributes.put(ACCOUNT_ID, nodeId.removePrefix(ACCOUNT_PREFIX))
-    }
-    inaccessibleEntities.add(1, attributes.build())
+  /** Records that a query observed [access] to the ad account [adAccountId] at [observedAt]. */
+  fun recordAccountAccess(adAccountId: String, access: AccountAccess, observedAt: Instant) {
+    accountAccessLastObserved.set(
+      observedAt.epochSecond,
+      Attributes.of(ACCOUNT_ID, adAccountId.removePrefix(ACCOUNT_PREFIX), RESULT, access.label),
+    )
   }
 
   /** How an impression query ended, with the label it is recorded under. */
@@ -90,12 +83,17 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     ERROR("error"),
   }
 
-  /** Why Meta refused a query for lack of access, with the label it is recorded under. */
-  enum class InaccessibleReason(val label: String) {
-    /** Error `code` 100 with subcode 33, or HTTP 404: missing or hidden from the token. */
-    ENTITY_NOT_FOUND("entity_not_found"),
-    /** Error `code` 10 or 200–299: visible, but the token has not been granted access. */
+  /** Access to an ad account observed by a query, with the label it is recorded under. */
+  enum class AccountAccess(val label: String) {
+    /** Meta answered the query. */
+    ACCESSIBLE("accessible"),
+    /** Error `code` 10 or 200–299: the token is valid but has not been granted the account. */
     PERMISSION_DENIED("permission_denied"),
+    /**
+     * Error `code` 100 with subcode 33, or HTTP 404: missing or hidden from the token. Meta answers
+     * the same way for an ad account that has not been shared with us.
+     */
+    INACCESSIBLE("inaccessible"),
   }
 
   companion object {
@@ -107,12 +105,10 @@ class MetaImpressionQueryMetrics(meter: Meter) {
      * `unknown` when the request could not be read or names no entities.
      */
     val ENTITY_TYPE: AttributeKey<String> = AttributeKey.stringKey("entity_type")
-    /** [InaccessibleReason.label] of a refused query. */
-    val REASON: AttributeKey<String> = AttributeKey.stringKey("reason")
-    /** Graph node Meta refused, such as a campaign ID or `act_<id>`. */
-    val NODE_ID: AttributeKey<String> = AttributeKey.stringKey("node_id")
-    /** The refused ad account, without its `act_` prefix, when [NODE_ID] is an ad account. */
+    /** The ad account, without its `act_` prefix. */
     val ACCOUNT_ID: AttributeKey<String> = AttributeKey.stringKey("account_id")
+    /** [AccountAccess.label] observed. */
+    val RESULT: AttributeKey<String> = AttributeKey.stringKey("result")
 
     private const val ACCOUNT_PREFIX = "act_"
   }

@@ -19,6 +19,8 @@ package org.wfanet.measurement.edpcomponents.meta
 import com.google.cloud.functions.HttpFunction
 import com.google.cloud.functions.HttpRequest
 import com.google.cloud.functions.HttpResponse
+import com.google.protobuf.Value
+import java.time.Clock
 import java.util.logging.Level
 import java.util.logging.Logger
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
@@ -43,11 +45,20 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * Results Fulfiller authenticates to this function with a GCP OIDC ID token (handled by the
  * platform / the `ValidationCloudFunctionClient`); Meta credentials live only in this function's
  * environment (Secret Manager) and never reach Results Fulfiller.
+ *
+ * Each query also records the access it observed to the ad accounts involved (see
+ * [MetaImpressionQueryMetrics.recordAccountAccess]), so onboarding gaps show per account without a
+ * separate check. An account is known from an account-level entity, or from the `ad_account_id`
+ * string in an entity's `entity_metadata`, which Results Fulfiller copies from the `EventGroup`.
+ * Meta does not name the account behind a campaign it hides, so that metadata is what attributes a
+ * refusal to an account. Refusals are never cached: a denied account is queried again on its next
+ * report, so newly granted access is observed.
  */
 class MetaImpressionQueryFunction(
   private val insightsClient: MetaInsightsClient,
   private val metrics: MetaImpressionQueryMetrics,
   private val flushTelemetry: () -> Unit,
+  private val clock: Clock,
 ) : HttpFunction {
 
   /**
@@ -59,6 +70,7 @@ class MetaImpressionQueryFunction(
       insightsClient = MetaEnvironment.marketingApiClient(),
       metrics = MetaImpressionQueryMetrics(MetaTelemetry.meter),
       flushTelemetry = { MetaTelemetry.flush() },
+      clock = Clock.systemUTC(),
     )
 
   override fun service(request: HttpRequest, response: HttpResponse) {
@@ -93,11 +105,6 @@ class MetaImpressionQueryFunction(
       // routine while accounts are onboarded and must not look like a credential outage.
       logger.log(Level.WARNING, "Meta denied access to the requested ad account", e)
       outcome = MetaImpressionQueryMetrics.Outcome.PERMISSION_DENIED
-      metrics.recordInaccessibleEntity(
-        MetaImpressionQueryMetrics.InaccessibleReason.PERMISSION_DENIED,
-        entityType,
-        e.nodeId,
-      )
       response.setStatusCode(HTTP_FORBIDDEN)
     } catch (e: Exception) {
       logger.log(Level.SEVERE, "Impression query failed", e)
@@ -141,6 +148,7 @@ class MetaImpressionQueryFunction(
 
     return try {
       val count = insightsClient.queryImpressions(targets, request.query.timeInterval, demographics)
+      recordAccountAccess(request, MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE, null)
       dataProviderImpressionQueryResponse {
         requestId = request.requestId
         result = impressionCount { value = count }
@@ -155,11 +163,7 @@ class MetaImpressionQueryFunction(
       // Meta reports an account that has not been shared with us the same way as a missing one,
       // so this is often an advertiser not yet onboarded.
       logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
-      metrics.recordInaccessibleEntity(
-        MetaImpressionQueryMetrics.InaccessibleReason.ENTITY_NOT_FOUND,
-        entityTypeLabel(request),
-        e.nodeId,
-      )
+      recordAccountAccess(request, MetaImpressionQueryMetrics.AccountAccess.INACCESSIBLE, e.nodeId)
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaRateLimitException) {
       // Rethrown rather than skipped so service() can answer with a status; see there.
@@ -167,6 +171,11 @@ class MetaImpressionQueryFunction(
     } catch (e: MetaAuthException) {
       throw e
     } catch (e: MetaPermissionDeniedException) {
+      recordAccountAccess(
+        request,
+        MetaImpressionQueryMetrics.AccountAccess.PERMISSION_DENIED,
+        e.nodeId,
+      )
       throw e
     } catch (e: MetaApiException) {
       logger.log(Level.WARNING, "Marketing API error for request ${request.requestId}", e)
@@ -188,6 +197,45 @@ class MetaImpressionQueryFunction(
   private fun translateFilter(expression: String): MetaDemographicFilter? =
     if (expression.isEmpty() || expression.trim() == "true") MetaDemographicFilter.UNFILTERED
     else null
+
+  /**
+   * Records [access] for the ad accounts it applies to: every account in [request] when
+   * [refusedNodeId] is null, otherwise the account behind the node Meta refused. Nothing is
+   * recorded for an account that cannot be identified. Throttles, rejected credentials and other
+   * failures say nothing about an account, so they are never recorded here.
+   */
+  private fun recordAccountAccess(
+    request: DataProviderImpressionQueryRequest,
+    access: MetaImpressionQueryMetrics.AccountAccess,
+    refusedNodeId: String?,
+  ) {
+    val accountIdByEntityId: Map<String, String> =
+      request.query.entityKeysList
+        .mapNotNull { entityKey ->
+          val accountId =
+            if (MetaEntityLevels[entityKey.entityType]?.level == ACCOUNT_LEVEL) entityKey.entityId
+            else
+              entityKey.entityMetadata.fieldsMap[AD_ACCOUNT_ID_FIELD]
+                ?.takeIf { it.kindCase == Value.KindCase.STRING_VALUE }
+                ?.stringValue
+          accountId
+            ?.removePrefix(ACCOUNT_PREFIX)
+            ?.ifEmpty { null }
+            ?.let { entityKey.entityId to it }
+        }
+        .toMap()
+    val accountIds: Collection<String> =
+      when {
+        refusedNodeId == null -> accountIdByEntityId.values.toSet()
+        refusedNodeId.startsWith(ACCOUNT_PREFIX) ->
+          listOf(refusedNodeId.removePrefix(ACCOUNT_PREFIX))
+        else -> listOfNotNull(accountIdByEntityId[refusedNodeId])
+      }
+    val observedAt = clock.instant()
+    for (accountId in accountIds) {
+      metrics.recordAccountAccess(accountId, access, observedAt)
+    }
+  }
 
   /** The [MetaImpressionQueryMetrics.ENTITY_TYPE] label for [request]'s entities. */
   private fun entityTypeLabel(request: DataProviderImpressionQueryRequest): String {
@@ -227,6 +275,10 @@ class MetaImpressionQueryFunction(
     private val logger = Logger.getLogger(MetaImpressionQueryFunction::class.java.name)
     private const val PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
     private const val UNKNOWN_ENTITY_TYPE = "unknown"
+    private const val ACCOUNT_LEVEL = "account"
+    private const val ACCOUNT_PREFIX = "act_"
+    // Key in an entity's `entity_metadata` naming the ad account that owns it.
+    private const val AD_ACCOUNT_ID_FIELD = "ad_account_id"
     private const val UNSUPPORTED_ENTITY_TYPE = "unsupported"
     private const val MIXED_ENTITY_TYPE = "mixed"
 

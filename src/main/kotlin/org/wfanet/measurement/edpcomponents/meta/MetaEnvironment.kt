@@ -16,7 +16,7 @@
 
 package org.wfanet.measurement.edpcomponents.meta
 
-/** Reads the Meta Cloud Functions' configuration from their environment. */
+/** Reads the Meta Cloud Function's configuration from its environment. */
 internal object MetaEnvironment {
   /**
    * Builds the production Meta client with the Meta System User token and app secret.
@@ -55,24 +55,4 @@ internal object MetaEnvironment {
       )
     }
   }
-
-  /**
-   * The ad accounts in `META_EXPECTED_AD_ACCOUNT_IDS`, a comma-separated list of IDs with or
-   * without their `act_` prefix, normalized to bare IDs with duplicates removed.
-   */
-  fun expectedAdAccountIds(): List<String> {
-    val value =
-      System.getenv("META_EXPECTED_AD_ACCOUNT_IDS")
-        ?: error("META_EXPECTED_AD_ACCOUNT_IDS not set (comma-separated ad account IDs)")
-    val ids =
-      value
-        .split(",")
-        .map { it.trim().removePrefix(ACCOUNT_PREFIX) }
-        .filter { it.isNotEmpty() }
-        .distinct()
-    require(ids.isNotEmpty()) { "META_EXPECTED_AD_ACCOUNT_IDS lists no ad accounts" }
-    return ids
-  }
-
-  private const val ACCOUNT_PREFIX = "act_"
 }

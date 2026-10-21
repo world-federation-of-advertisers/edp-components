@@ -14,6 +14,14 @@ bazel_dep(
     repo_name = "cross_media_measurement_api",
 )
 
+# TODO(world-federation-of-advertisers/cross-media-measurement-api#311): Replace with the released
+#   version that adds ImpressionQuery.EntityKey.entity_metadata.
+git_override(
+    module_name = "cross-media-measurement-api",
+    commit = "c6e4f5235936770158bb559b1e2e830b042a0c3e",
+    remote = "https://github.com/world-federation-of-advertisers/cross-media-measurement-api.git",
+)
+
 # protobuf and rules_kotlin_jvm contribute to the shared `maven` repo.
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(

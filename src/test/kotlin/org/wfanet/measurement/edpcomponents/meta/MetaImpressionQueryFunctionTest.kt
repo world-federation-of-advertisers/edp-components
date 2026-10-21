@@ -19,10 +19,11 @@ package org.wfanet.measurement.edpcomponents.meta
 import com.google.cloud.functions.HttpRequest
 import com.google.cloud.functions.HttpResponse
 import com.google.common.truth.Truth.assertThat
+import com.google.protobuf.Struct
+import com.google.protobuf.Value
 import com.google.protobuf.timestamp
 import com.google.type.Interval
 import com.google.type.interval
-import io.opentelemetry.api.common.Attributes
 import io.opentelemetry.sdk.metrics.SdkMeterProvider
 import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader
 import java.io.BufferedReader
@@ -31,6 +32,9 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.Optional
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -52,7 +56,7 @@ class MetaImpressionQueryFunctionTest {
   private var flushes = 0
 
   private fun newFunction(insightsClient: MetaInsightsClient) =
-    MetaImpressionQueryFunction(insightsClient, metrics) { flushes++ }
+    MetaImpressionQueryFunction(insightsClient, metrics, { flushes++ }, CLOCK)
 
   /** Query counts recorded, by (outcome, entity type). */
   private fun recordedQueries(): Map<Pair<String?, String?>, Long> =
@@ -67,13 +71,18 @@ class MetaImpressionQueryFunctionTest {
         ) to point.value
       }
 
-  /** Points of `meta.impression_query.inaccessible_entities`, by attribute set. */
-  private fun recordedInaccessibleEntities(): Map<Attributes, Long> =
+  /** Last-observed times recorded, in epoch seconds, by (account ID, result). */
+  private fun recordedAccountAccess(): Map<Pair<String?, String?>, Long> =
     metricReader
       .collectAllMetrics()
-      .filter { it.name == "meta.impression_query.inaccessible_entities" }
-      .flatMap { it.longSumData.points }
-      .associate { point -> point.attributes to point.value }
+      .filter { it.name == "meta.account_access.last_observed" }
+      .flatMap { it.longGaugeData.points }
+      .associate { point ->
+        Pair(
+          point.attributes.get(MetaImpressionQueryMetrics.ACCOUNT_ID),
+          point.attributes.get(MetaImpressionQueryMetrics.RESULT),
+        ) to point.value
+      }
 
   private fun serve(insightsClient: MetaInsightsClient, body: ByteArray): FakeHttpResponse {
     val httpResponse = FakeHttpResponse()
@@ -340,19 +349,13 @@ class MetaImpressionQueryFunctionTest {
   fun `service records an entity Meta cannot find or the token cannot see`() {
     serve(
       FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
-      request(entityType = "ad_set", entityIds = listOf("111")).toByteArray(),
+      request(entityType = "ad_set", entityIds = listOf("111"), adAccountId = "act_999")
+        .toByteArray(),
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("entity_not_found", "adset"), 1L)
-    assertThat(recordedInaccessibleEntities())
-      .containsExactly(
-        Attributes.builder()
-          .put(MetaImpressionQueryMetrics.REASON, "entity_not_found")
-          .put(MetaImpressionQueryMetrics.ENTITY_TYPE, "adset")
-          .put(MetaImpressionQueryMetrics.NODE_ID, "111")
-          .build(),
-        1L,
-      )
+    // Meta hides the account behind the entity; the EventGroup metadata names it.
+    assertThat(recordedAccountAccess()).containsExactly(Pair("999", "inaccessible"), NOW_SECONDS)
   }
 
   @Test
@@ -365,18 +368,65 @@ class MetaImpressionQueryFunctionTest {
 
     assertThat(httpResponse.statusCode).isEqualTo(403)
     assertThat(recordedQueries()).containsExactly(Pair("permission_denied", "campaign"), 1L)
-    // The refused node is an ad account, so its ID is recorded too.
-    assertThat(recordedInaccessibleEntities())
-      .containsExactly(
-        Attributes.builder()
-          .put(MetaImpressionQueryMetrics.REASON, "permission_denied")
-          .put(MetaImpressionQueryMetrics.ENTITY_TYPE, "campaign")
-          .put(MetaImpressionQueryMetrics.NODE_ID, "act_999")
-          .put(MetaImpressionQueryMetrics.ACCOUNT_ID, "999")
-          .build(),
-        1L,
-      )
+    // The refused node is the ad account itself, so no metadata is needed to name it.
+    assertThat(recordedAccountAccess())
+      .containsExactly(Pair("999", "permission_denied"), NOW_SECONDS)
     assertThat(flushes).isEqualTo(1)
+  }
+
+  @Test
+  fun `service records each queried account as accessible on success`() {
+    val twoAccounts =
+      request(entityIds = listOf("111"), adAccountId = "999")
+        .toBuilder()
+        .apply {
+          queryBuilder.addEntityKeys(
+            entityKey {
+              entityType = "ad_account"
+              entityId = "888"
+            }
+          )
+        }
+        .build()
+
+    serve(FakeMetaInsightsClient(result = 1L), twoAccounts.toByteArray())
+
+    assertThat(recordedAccountAccess())
+      .containsExactly(
+        Pair("999", "accessible"),
+        NOW_SECONDS,
+        Pair("888", "accessible"),
+        NOW_SECONDS,
+      )
+  }
+
+  @Test
+  fun `service records no account access when the entity names no account`() {
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
+      request(entityIds = listOf("111")).toByteArray(),
+    )
+
+    assertThat(recordedQueries()).containsExactly(Pair("entity_not_found", "campaign"), 1L)
+    assertThat(recordedAccountAccess()).isEmpty()
+  }
+
+  @Test
+  fun `service ignores a non-string ad_account_id`() {
+    val numericAccount =
+      request(entityIds = listOf("111"))
+        .toBuilder()
+        .apply {
+          queryBuilder.entityKeysBuilderList.single().entityMetadata =
+            Struct.newBuilder()
+              .putFields("ad_account_id", Value.newBuilder().setNumberValue(999.0).build())
+              .build()
+        }
+        .build()
+
+    serve(FakeMetaInsightsClient(result = 1L), numericAccount.toByteArray())
+
+    assertThat(recordedAccountAccess()).isEmpty()
   }
 
   @Test
@@ -405,7 +455,8 @@ class MetaImpressionQueryFunctionTest {
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("rate_limited", "campaign"), 1L)
-    assertThat(recordedInaccessibleEntities()).isEmpty()
+    // A throttle says nothing about the account, so its last-observed access is unchanged.
+    assertThat(recordedAccountAccess()).isEmpty()
     assertThat(flushes).isEqualTo(1)
   }
 
@@ -413,10 +464,11 @@ class MetaImpressionQueryFunctionTest {
   fun `service records a query whose credentials Meta rejected`() {
     serve(
       FakeMetaInsightsClient(throwable = MetaAuthException("expired")),
-      request(entityIds = listOf("111")).toByteArray(),
+      request(entityIds = listOf("111"), adAccountId = "999").toByteArray(),
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("auth_failed", "campaign"), 1L)
+    assertThat(recordedAccountAccess()).isEmpty()
     assertThat(flushes).isEqualTo(1)
   }
 
@@ -424,10 +476,11 @@ class MetaImpressionQueryFunctionTest {
   fun `service records a Marketing API failure`() {
     serve(
       FakeMetaInsightsClient(throwable = MetaApiException("boom")),
-      request(entityIds = listOf("111")).toByteArray(),
+      request(entityIds = listOf("111"), adAccountId = "999").toByteArray(),
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("api_error", "campaign"), 1L)
+    assertThat(recordedAccountAccess()).isEmpty()
   }
 
   @Test
@@ -499,6 +552,7 @@ class MetaImpressionQueryFunctionTest {
     filter: String = "",
     entityType: String = "campaign",
     entityIds: List<String>,
+    adAccountId: String? = null,
   ) = dataProviderImpressionQueryRequest {
     requestId = REQUEST_ID
     dataProvider = "dataProviders/edp-meta"
@@ -507,6 +561,12 @@ class MetaImpressionQueryFunctionTest {
         entityKeys += entityKey {
           this.entityType = entityType
           entityId = id
+          if (adAccountId != null) {
+            entityMetadata =
+              Struct.newBuilder()
+                .putFields("ad_account_id", Value.newBuilder().setStringValue(adAccountId).build())
+                .build()
+          }
         }
       }
       timeInterval = interval {
@@ -519,5 +579,7 @@ class MetaImpressionQueryFunctionTest {
 
   companion object {
     private const val REQUEST_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    private const val NOW_SECONDS = 1_760_000_000L
+    private val CLOCK: Clock = Clock.fixed(Instant.ofEpochSecond(NOW_SECONDS), ZoneOffset.UTC)
   }
 }
