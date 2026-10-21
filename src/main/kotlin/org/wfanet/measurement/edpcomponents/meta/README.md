@@ -9,7 +9,7 @@ matching this filter?" — nothing more. All comparison/verdict logic lives in R
 ## Contract
 
 - **Request** `DataProviderImpressionQueryRequest` (binary proto): `request_id`, `data_provider`,
-  `query { entity_keys[], time_interval, filter.expression (CEL) }`.
+  `query { event_groups[], time_interval, filter.expression (CEL) }`.
 - **Response** `DataProviderImpressionQueryResponse`: `request_id` + `oneof { result (ImpressionCount)
   | skipped (SkipDetail{reason, detail}) }`.
 - **Skip reasons**: `FILTER_NOT_SUPPORTED`, `ENTITY_NOT_FOUND`, `API_ERROR`.
@@ -21,7 +21,7 @@ Bazel registry).
 ## Flow
 
 1. Parse the binary-proto request.
-2. `MetaEntityLevels` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
+2. `MetaEntityLevels` — route each EventGroup's `entity_key` by `entity_type` to a Graph node ID and Insights
    `level`: `campaign`, `ad`/`creative` → `ad`, `ad_set`/`adset` → `adset`, `account`/`ad_account` →
    `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
@@ -199,8 +199,33 @@ For a throwaway dev deployment, `--set-env-vars=META_ACCESS_TOKEN=...,META_APP_S
 provisioning Secret Manager. Never do this outside a disposable test project: the values are
 visible in the function's configuration.
 
-Managed deployment (Terraform, mirroring the `http-cloud-function` module used by the EDP
-Aggregator functions) is not wired up yet.
+Managed deployment lives in cross-media-measurement's Terraform: the edp-aggregator module deploys
+the function with its `http-cloud-function` module, from the version pinned in each environment's
+tfvars.
+
+## Metrics
+
+`MetaImpressionQueryFunction` records each query in the `meta.impression_query.queries` counter,
+with attributes `outcome` (`success`, a skip reason such as `entity_not_found`, or
+`permission_denied`, `rate_limited`, `auth_failed` or `error`) and `entity_type` (the Meta level
+queried).
+
+Each query also records the access it observed to its ad accounts in the
+`meta.account_access.last_observed` gauge: the time, in seconds since the epoch, each
+(`account_id`, `result`) pair was last seen, where `result` is `accessible`, `permission_denied` or
+`inaccessible`. An account's current access is the result with the latest time. An account is known
+from an account-level entity, or from the `ad_account_id` string in the `entity_metadata` of each
+EventGroup in the request; Meta does not name the account behind a
+campaign it hides, so that metadata is what attributes a refusal. Throttles, rejected credentials
+and other failures leave an account's access unchanged, and an account no report has queried yet
+has no points. Refusals are not cached, so a denied account is queried again on its next report and
+newly granted access shows up.
+
+Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME` (for example
+`meta.impression_query`), and grant the service account `roles/monitoring.metricWriter`, to export
+them. OpenTelemetry exporters default to `none`, so without `OTEL_METRICS_EXPORTER` nothing is
+exported. The metric names and attributes are also used by cross-media-measurement's
+`meta_impression_query_dashboard.json`; change both together.
 
 ## Status
 
@@ -214,5 +239,4 @@ Open TODOs (tracked in code):
   alongside `age` or `gender`, so a filtered interval needing hourly boundary queries cannot be
   answered at all (world-federation-of-advertisers/edp-components#16).
 - **Async Insights** report-run path for large queries.
-- **Terraform deploy config** — the `java_binary` exists (see above); managed deployment does not.
 - **Sandbox integration test** — world-federation-of-advertisers/edp-components#3.
