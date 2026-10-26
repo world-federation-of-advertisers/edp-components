@@ -203,6 +203,10 @@ class MetaMarketingApiInsightsClient(
     return total
   }
 
+  override fun knownAdAccountId(target: MetaInsightsTarget): String? =
+    if (target.level == ACCOUNT_LEVEL) target.nodeId.removePrefix(ACCOUNT_PREFIX)
+    else accountIdByNodeId[target.nodeId]
+
   private fun withAppSecretProof(url: String): String {
     val separator = if ('?' in url) "&" else "?"
     return "$url${separator}appsecret_proof=$appSecretProof"

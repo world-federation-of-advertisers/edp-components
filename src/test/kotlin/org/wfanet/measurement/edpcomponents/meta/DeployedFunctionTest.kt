@@ -36,7 +36,7 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
-import org.wfanet.measurement.api.v2alpha.EventGroup
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 
@@ -195,14 +195,10 @@ class DeployedFunctionTest {
           .toString()
       this.dataProvider = dataProvider
       query = impressionQuery {
-        eventGroups +=
-          EventGroup.newBuilder()
-            .setEntityKey(
-              EventGroup.EntityKey.newBuilder()
-                .setEntityType(this@DeployedFunctionTest.entityType)
-                .setEntityId(this@DeployedFunctionTest.entityId!!)
-            )
-            .build()
+        entityKeys += entityKey {
+          this.entityType = this@DeployedFunctionTest.entityType
+          this.entityId = this@DeployedFunctionTest.entityId!!
+        }
         timeInterval = interval {
           startTime = timestamp { seconds = startEpochSeconds!!.toLong() }
           endTime = timestamp { seconds = endEpochSeconds!!.toLong() }

@@ -33,7 +33,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
-import org.wfanet.measurement.api.v2alpha.EventGroup
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 import org.wfanet.measurement.gcloud.testing.FunctionsFrameworkInvokerProcess
@@ -144,12 +144,10 @@ class MetaImpressionQueryFunctionInvokerTest {
       requestId = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
       dataProvider = "dataProviders/edp-meta"
       query = impressionQuery {
-        eventGroups +=
-          EventGroup.newBuilder()
-            .setEntityKey(
-              EventGroup.EntityKey.newBuilder().setEntityType("campaign").setEntityId("111")
-            )
-            .build()
+        entityKeys += entityKey {
+          entityType = "campaign"
+          entityId = "111"
+        }
         timeInterval = interval {
           startTime = timestamp { seconds = 1_700_000_000 }
           endTime = timestamp { seconds = 1_700_086_400 }

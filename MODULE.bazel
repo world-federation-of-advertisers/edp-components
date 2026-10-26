@@ -14,14 +14,6 @@ bazel_dep(
     repo_name = "cross_media_measurement_api",
 )
 
-# TODO(world-federation-of-advertisers/cross-media-measurement-api#311): Replace with the released
-#   version that replaces ImpressionQuery.entity_keys with event_groups.
-git_override(
-    module_name = "cross-media-measurement-api",
-    commit = "cb0825e2b2c764ea499184c376b60cca2476ff86",
-    remote = "https://github.com/world-federation-of-advertisers/cross-media-measurement-api.git",
-)
-
 # protobuf and rules_kotlin_jvm contribute to the shared `maven` repo.
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(

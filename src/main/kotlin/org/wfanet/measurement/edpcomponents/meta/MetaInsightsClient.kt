@@ -50,6 +50,14 @@ interface MetaInsightsClient {
     timeInterval: Interval,
     demographics: MetaDemographicFilter,
   ): Long
+
+  /**
+   * Returns the ad account ID, without its `act_` prefix, that owns [target] if this client already
+   * knows it, otherwise null. Makes no Marketing API call: for an entity below account level, the
+   * account is known only once a query has resolved it, which Meta allows only when the entity is
+   * visible to the token.
+   */
+  fun knownAdAccountId(target: MetaInsightsTarget): String?
 }
 
 /**

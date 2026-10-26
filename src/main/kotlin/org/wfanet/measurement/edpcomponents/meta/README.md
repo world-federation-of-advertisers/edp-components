@@ -214,9 +214,9 @@ Each query also records the access it observed to its ad accounts in the
 `meta.account_access.last_observed` gauge: the time, in seconds since the epoch, each
 (`account_id`, `result`) pair was last seen, where `result` is `accessible`, `permission_denied` or
 `inaccessible`. An account's current access is the result with the latest time. An account is known
-from an account-level entity, or from the `ad_account_id` string in the `entity_metadata` of each
-EventGroup in the request; Meta does not name the account behind a
-campaign it hides, so that metadata is what attributes a refusal. Throttles, rejected credentials
+from an account-level entity, or once the client has resolved the entity's account. Meta does not
+reveal the account behind an entity it hides from the token, so such a refusal is counted only by
+outcome (see #27 for resolving it from the `EventGroup`). Throttles, rejected credentials
 and other failures leave an account's access unchanged, and an account no report has queried yet
 has no points. Refusals are not cached, so a denied account is queried again on its next report and
 newly granted access shows up.
