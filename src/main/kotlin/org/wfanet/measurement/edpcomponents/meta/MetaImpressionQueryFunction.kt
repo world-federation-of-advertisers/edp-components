@@ -143,9 +143,16 @@ class MetaImpressionQueryFunction(
           level = entityLevel.level,
         )
     }
+    // Targets are queried one at a time, as the client does anyway, so that a failure for one ad
+    // account still records the accounts whose targets succeeded.
+    val succeeded = ArrayList<MetaInsightsTarget>(targets.size)
     return try {
-      val count = insightsClient.queryImpressions(targets, request.query.timeInterval, demographics)
-      recordAccountAccess(targets, MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE, null)
+      var count = 0L
+      for (target in targets) {
+        count +=
+          insightsClient.queryImpressions(listOf(target), request.query.timeInterval, demographics)
+        succeeded += target
+      }
       dataProviderImpressionQueryResponse {
         requestId = request.requestId
         result = impressionCount { value = count }
@@ -160,7 +167,11 @@ class MetaImpressionQueryFunction(
       // Meta reports an account that has not been shared with us the same way as a missing one,
       // so this is often an advertiser not yet onboarded.
       logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
-      recordAccountAccess(targets, MetaImpressionQueryMetrics.AccountAccess.INACCESSIBLE, e.nodeId)
+      recordRefusal(
+        targets.getOrNull(succeeded.size),
+        MetaImpressionQueryMetrics.AccountAccess.INACCESSIBLE,
+        e.nodeId,
+      )
       skip(request.requestId, SkipReason.ENTITY_NOT_FOUND, e.message ?: "entity not found")
     } catch (e: MetaRateLimitException) {
       // Rethrown rather than skipped so service() can answer with a status; see there.
@@ -168,8 +179,8 @@ class MetaImpressionQueryFunction(
     } catch (e: MetaAuthException) {
       throw e
     } catch (e: MetaPermissionDeniedException) {
-      recordAccountAccess(
-        targets,
+      recordRefusal(
+        targets.getOrNull(succeeded.size),
         MetaImpressionQueryMetrics.AccountAccess.PERMISSION_DENIED,
         e.nodeId,
       )
@@ -177,6 +188,8 @@ class MetaImpressionQueryFunction(
     } catch (e: MetaApiException) {
       logger.log(Level.WARNING, "Marketing API error for request ${request.requestId}", e)
       skip(request.requestId, SkipReason.API_ERROR, e.message ?: "Marketing API error")
+    } finally {
+      recordAccessible(succeeded, failed = targets.getOrNull(succeeded.size))
     }
   }
 
@@ -196,28 +209,37 @@ class MetaImpressionQueryFunction(
     else null
 
   /**
-   * Records [access] for the ad accounts it applies to: every known account among [targets] when
-   * [refusedNodeId] is null, otherwise the account behind the node Meta refused, if known. Nothing
-   * is recorded for an account that cannot be identified. Throttles, rejected credentials and other
-   * failures say nothing about an account, so they are never recorded here.
+   * Records as accessible the known ad accounts of the [succeeded] targets, except the account of
+   * [failed], the target being queried when the request stopped, whose state its failure decides.
    */
-  private fun recordAccountAccess(
-    targets: List<MetaInsightsTarget>,
+  private fun recordAccessible(succeeded: List<MetaInsightsTarget>, failed: MetaInsightsTarget?) {
+    val failedAccountId = failed?.let { insightsClient.knownAdAccountId(it) }
+    val accountIds =
+      succeeded.mapNotNull { insightsClient.knownAdAccountId(it) }.toSet() -
+        setOfNotNull(failedAccountId)
+    recordAccountAccess(accountIds, MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE)
+  }
+
+  /**
+   * Records [access] for the ad account Meta refused: the account named by [refusedNodeId] if it is
+   * an ad account, otherwise the known account of the [failed] target. Nothing is recorded when the
+   * account is unknown, as it is for an entity Meta hides from the token.
+   */
+  private fun recordRefusal(
+    failed: MetaInsightsTarget?,
     access: MetaImpressionQueryMetrics.AccountAccess,
-    refusedNodeId: String?,
+    refusedNodeId: String,
   ) {
-    val accountIds: Collection<String> =
-      when {
-        refusedNodeId == null -> targets.mapNotNull { insightsClient.knownAdAccountId(it) }.toSet()
-        refusedNodeId.startsWith(ACCOUNT_PREFIX) ->
-          listOf(refusedNodeId.removePrefix(ACCOUNT_PREFIX))
-        else ->
-          listOfNotNull(
-            targets
-              .firstOrNull { it.nodeId == refusedNodeId }
-              ?.let { insightsClient.knownAdAccountId(it) }
-          )
-      }
+    val accountId =
+      if (refusedNodeId.startsWith(ACCOUNT_PREFIX)) refusedNodeId.removePrefix(ACCOUNT_PREFIX)
+      else failed?.let { insightsClient.knownAdAccountId(it) }
+    recordAccountAccess(setOfNotNull(accountId), access)
+  }
+
+  private fun recordAccountAccess(
+    accountIds: Set<String>,
+    access: MetaImpressionQueryMetrics.AccountAccess,
+  ) {
     val observedAt = clock.instant()
     for (accountId in accountIds) {
       metrics.recordAccountAccess(accountId, access, observedAt)

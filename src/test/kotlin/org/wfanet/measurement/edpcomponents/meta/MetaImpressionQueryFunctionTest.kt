@@ -89,24 +89,36 @@ class MetaImpressionQueryFunctionTest {
   }
 
   /**
-   * [MetaInsightsClient] that returns a fixed count or throws, and records the targets it saw.
-   * [knownAdAccounts] maps a node ID to the ad account the client has resolved for it.
+   * [MetaInsightsClient] that returns [result] per query or throws [throwable], and records the
+   * targets it saw.
    */
   private class FakeMetaInsightsClient(
     private val result: Long = 0L,
     private val throwable: Throwable? = null,
-    private val knownAdAccounts: Map<String, String> = emptyMap(),
   ) : MetaInsightsClient {
-    var lastTargets: List<MetaInsightsTarget>? = null
-      private set
+    private val queriedTargets = mutableListOf<MetaInsightsTarget>()
+
+    /** Ad account the client has resolved, by node ID. */
+    val knownAdAccounts = mutableMapOf<String, String>()
+
+    /** Node whose query throws [throwable]; null means every query does. */
+    var throwingNodeId: String? = null
+
+    /** Targets queried so far, across queries, or null if none. */
+    val lastTargets: List<MetaInsightsTarget>?
+      get() = queriedTargets.toList().ifEmpty { null }
 
     override fun queryImpressions(
       targets: List<MetaInsightsTarget>,
       timeInterval: Interval,
       demographics: MetaDemographicFilter,
     ): Long {
-      lastTargets = targets
-      throwable?.let { throw it }
+      queriedTargets += targets
+      if (
+        throwable != null && (throwingNodeId == null || targets.any { it.nodeId == throwingNodeId })
+      ) {
+        throw throwable
+      }
       return result
     }
 
@@ -256,7 +268,8 @@ class MetaImpressionQueryFunctionTest {
 
     assertThat(response.requestId).isEqualTo(REQUEST_ID)
     assertThat(response.hasResult()).isTrue()
-    assertThat(response.result.value).isEqualTo(12_345L)
+    // Summed across the two targets, each answered with 12,345.
+    assertThat(response.result.value).isEqualTo(24_690L)
     assertThat(fake.lastTargets)
       .containsExactly(
         MetaInsightsTarget(nodeId = "111", level = "campaign"),
@@ -391,10 +404,9 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `service records the known account of a refused entity`() {
     serve(
-      FakeMetaInsightsClient(
-        throwable = MetaPermissionDeniedException("no access", "111"),
-        knownAdAccounts = mapOf("111" to "999"),
-      ),
+      FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "111")).apply {
+        knownAdAccounts["111"] = "999"
+      },
       request(entityIds = listOf("111")).toByteArray(),
     )
 
@@ -418,7 +430,7 @@ class MetaImpressionQueryFunctionTest {
         .build()
 
     serve(
-      FakeMetaInsightsClient(result = 1L, knownAdAccounts = mapOf("111" to "999")),
+      FakeMetaInsightsClient(result = 1L).apply { knownAdAccounts["111"] = "999" },
       twoAccounts.toByteArray(),
     )
 
@@ -429,6 +441,45 @@ class MetaImpressionQueryFunctionTest {
         Pair("888", "accessible"),
         NOW_SECONDS,
       )
+  }
+
+  @Test
+  fun `service records the accounts that succeeded when another account is refused`() {
+    val fake =
+      FakeMetaInsightsClient(result = 1L, throwable = MetaPermissionDeniedException("no", "222"))
+        .apply {
+          knownAdAccounts["111"] = "999"
+          knownAdAccounts["222"] = "888"
+          throwingNodeId = "222"
+        }
+
+    val httpResponse = serve(fake, request(entityIds = listOf("111", "222")).toByteArray())
+
+    // The request still fails as a whole, but the account whose campaign succeeded is recorded.
+    assertThat(httpResponse.statusCode).isEqualTo(403)
+    assertThat(recordedAccountAccess())
+      .containsExactly(
+        Pair("999", "accessible"),
+        NOW_SECONDS,
+        Pair("888", "permission_denied"),
+        NOW_SECONDS,
+      )
+  }
+
+  @Test
+  fun `service records the accounts that succeeded before Meta throttled`() {
+    val fake =
+      FakeMetaInsightsClient(result = 1L, throwable = MetaRateLimitException("throttled")).apply {
+        knownAdAccounts["111"] = "999"
+        knownAdAccounts["222"] = "888"
+        throwingNodeId = "222"
+      }
+
+    val httpResponse = serve(fake, request(entityIds = listOf("111", "222")).toByteArray())
+
+    // A throttle says nothing about the throttled account, so only the succeeded one is recorded.
+    assertThat(httpResponse.statusCode).isEqualTo(429)
+    assertThat(recordedAccountAccess()).containsExactly(Pair("999", "accessible"), NOW_SECONDS)
   }
 
   @Test
@@ -465,10 +516,9 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `service records a query whose credentials Meta rejected`() {
     serve(
-      FakeMetaInsightsClient(
-        throwable = MetaAuthException("expired"),
-        knownAdAccounts = mapOf("111" to "999"),
-      ),
+      FakeMetaInsightsClient(throwable = MetaAuthException("expired")).apply {
+        knownAdAccounts["111"] = "999"
+      },
       request(entityIds = listOf("111")).toByteArray(),
     )
 
@@ -480,10 +530,9 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `service records a Marketing API failure`() {
     serve(
-      FakeMetaInsightsClient(
-        throwable = MetaApiException("boom"),
-        knownAdAccounts = mapOf("111" to "999"),
-      ),
+      FakeMetaInsightsClient(throwable = MetaApiException("boom")).apply {
+        knownAdAccounts["111"] = "999"
+      },
       request(entityIds = listOf("111")).toByteArray(),
     )
 
