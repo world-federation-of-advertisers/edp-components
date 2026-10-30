@@ -27,6 +27,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertFailsWith
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
@@ -91,6 +92,15 @@ class MetaImpressionQueryFunctionInvokerTest {
   fun `treats a blank CMMS_KINGDOM_TARGET as unset`() {
     // No TLS files are configured, so the function would fail to start if it used the target.
     assertThat(queryFunction(mapOf("CMMS_KINGDOM_TARGET" to ""))).isEqualTo(502)
+  }
+
+  @Test
+  fun `fails to start when CMMS_KINGDOM_TARGET is set without the TLS files`() {
+    // A misconfigured Kingdom connection fails the deployment rather than silently disabling
+    // attribution.
+    assertFailsWith<IllegalStateException> {
+      queryFunction(mapOf("CMMS_KINGDOM_TARGET" to "localhost:1"))
+    }
   }
 
   /**

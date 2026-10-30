@@ -250,7 +250,9 @@ attribution; it never fails the query.
 
 Implemented: request/response handling, entity-type routing for all four Meta Insights levels,
 Insights JSON parsing with paging, ad-account-timezone `time_range` conversion, `appsecret_proof` on
-every request, and skip-reason mapping.
+every request, skip-reason mapping, query and per-account access metrics, and attribution of
+hidden entities to ad accounts through their `EventGroup`s (see Resolving accounts from
+EventGroups).
 
 Open TODOs (tracked in code):
 - **CEL → breakdown** translation for `age_group` + `gender` — only the unfiltered case is supported
