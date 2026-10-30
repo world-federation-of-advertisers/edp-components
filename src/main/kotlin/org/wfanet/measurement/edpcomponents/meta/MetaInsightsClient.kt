@@ -50,6 +50,14 @@ interface MetaInsightsClient {
     timeInterval: Interval,
     demographics: MetaDemographicFilter,
   ): Long
+
+  /**
+   * Returns the ad account ID, without its `act_` prefix, that owns [target] if this client already
+   * knows it, otherwise null. Makes no Marketing API call: for an entity below account level, the
+   * account is known only once a query has resolved it, which Meta allows only when the entity is
+   * visible to the token.
+   */
+  fun knownAdAccountId(target: MetaInsightsTarget): String?
 }
 
 /**
@@ -101,8 +109,13 @@ enum class MetaGender(val apiValue: String) {
   UNKNOWN("unknown"),
 }
 
-/** A Meta campaign/entity referenced by the request could not be found or accessed. */
-class MetaEntityNotFoundException(message: String, cause: Throwable? = null) :
+/**
+ * A Meta campaign/entity referenced by the request could not be found or accessed.
+ *
+ * @property nodeId the Graph node Meta reported as missing or hidden, such as a campaign ID or
+ *   `act_<id>`. Meta answers the same way for an ad account that has not been shared with us.
+ */
+class MetaEntityNotFoundException(message: String, val nodeId: String, cause: Throwable? = null) :
   Exception(message, cause)
 
 /** The Marketing API call failed (network, 5xx, malformed response, etc.). */
@@ -147,8 +160,12 @@ class MetaAuthException(message: String, cause: Throwable? = null) :
  * granted this ad account. That is routine while ad accounts are being onboarded, so it must not
  * read as a credential outage affecting every request.
  */
-class MetaPermissionDeniedException(message: String, cause: Throwable? = null) :
-  MetaApiException(message, cause)
+class MetaPermissionDeniedException(
+  message: String,
+  /** The Graph node Meta refused, such as a campaign ID or `act_<id>`. */
+  val nodeId: String,
+  cause: Throwable? = null,
+) : MetaApiException(message, cause)
 
 /**
  * The requested time interval cannot be answered in Meta's buckets.

@@ -16,15 +16,25 @@ kt_jvm_library(
     name = "meta_impression_query",
     srcs = [
         "MetaEntityLevel.kt",
+        "MetaEnvironment.kt",
         "MetaImpressionQueryFunction.kt",
+        "MetaImpressionQueryMetrics.kt",
         "MetaInsightsClient.kt",
         "MetaMarketingApiInsightsClient.kt",
+        "MetaTelemetry.kt",
     ],
+    # Registers the `google_cloud_monitoring` exporter with OpenTelemetry autoconfiguration.
+    runtime_deps = ["@maven//:com_google_cloud_opentelemetry_exporter_auto"],
     deps = [
         ":data_provider_impression_query_kt_jvm_proto",
         "@maven//:com_google_cloud_functions_functions_framework_api",
         "@maven//:com_google_code_gson_gson",
         "@maven//:com_google_protobuf_protobuf_java",
+        "@maven//:io_opentelemetry_opentelemetry_api",
+        "@maven//:io_opentelemetry_opentelemetry_sdk",
+        "@maven//:io_opentelemetry_opentelemetry_sdk_common",
+        "@maven//:io_opentelemetry_opentelemetry_sdk_extension_autoconfigure",
+        "@maven//:io_opentelemetry_opentelemetry_sdk_metrics",
     ],
 )
 

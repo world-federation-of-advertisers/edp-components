@@ -203,6 +203,10 @@ class MetaMarketingApiInsightsClient(
     return total
   }
 
+  override fun knownAdAccountId(target: MetaInsightsTarget): String? =
+    if (target.level == ACCOUNT_LEVEL) target.nodeId.removePrefix(ACCOUNT_PREFIX)
+    else accountIdByNodeId[target.nodeId]
+
   private fun withAppSecretProof(url: String): String {
     val separator = if ('?' in url) "&" else "?"
     return "$url${separator}appsecret_proof=$appSecretProof"
@@ -452,13 +456,16 @@ class MetaMarketingApiInsightsClient(
         MetaAuthException("Marketing API rejected credentials. ${error.describe(nodeForError)}")
       error?.isPermissionDenied == true ->
         MetaPermissionDeniedException(
-          "Marketing API denied access. ${error.describe(nodeForError)}"
+          "Marketing API denied access. ${error.describe(nodeForError)}",
+          nodeForError,
         )
       error?.isInaccessible == true ->
         MetaEntityNotFoundException(
-          "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}"
+          "Meta node $nodeForError not found or not accessible. ${error.describe(nodeForError)}",
+          nodeForError,
         )
-      status == 404 -> MetaEntityNotFoundException("Meta node $nodeForError not found")
+      status == 404 ->
+        MetaEntityNotFoundException("Meta node $nodeForError not found", nodeForError)
       error != null -> MetaApiException("HTTP $status. ${error.describe(nodeForError)}")
       else ->
         MetaApiException(
@@ -543,10 +550,14 @@ class MetaMarketingApiInsightsClient(
       isAuthFailure ->
         MetaAuthException("Marketing API rejected credentials. ${describe(nodeForError)}")
       isPermissionDenied ->
-        MetaPermissionDeniedException("Marketing API denied access. ${describe(nodeForError)}")
+        MetaPermissionDeniedException(
+          "Marketing API denied access. ${describe(nodeForError)}",
+          nodeForError,
+        )
       isInaccessible ->
         MetaEntityNotFoundException(
-          "Meta node $nodeForError not found or not accessible. ${describe(nodeForError)}"
+          "Meta node $nodeForError not found or not accessible. ${describe(nodeForError)}",
+          nodeForError,
         )
       else -> MetaApiException(describe(nodeForError))
     }
