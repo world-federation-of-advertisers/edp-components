@@ -236,12 +236,12 @@ exported. The metric names and attributes are also used by cross-media-measureme
 ## Resolving accounts from EventGroups
 
 To attribute entities Meta hides, the function calls the CMMS `GetEventGroup` method as Meta's
-`DataProvider` over mutual TLS. Set `CMMS_KINGDOM_TARGET` (the Kingdom public API, `host:port`) and
+`DataProvider` over mutual TLS. Set `KINGDOM_TARGET` (the Kingdom public API, `host:port`) and
 mount the `DataProvider`'s TLS certificate, PKCS #8 private key and trusted root certificates as
 files named by `CMMS_TLS_CERT_FILE`, `CMMS_TLS_KEY_FILE` and `CMMS_TRUSTED_CERTS_FILE`, for example
-with `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `CMMS_KINGDOM_CERT_HOST` optionally
+with `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `KINGDOM_CERT_HOST` optionally
 overrides the host name expected in the Kingdom's certificate, and `CMMS_REQUEST_TIMEOUT_SECONDS`
-(default 5) the deadline of each lookup. When `CMMS_KINGDOM_TARGET` is unset or blank, no lookups
+(default 5) the deadline of each lookup. When `KINGDOM_TARGET` is unset or blank, no lookups
 are made. When it is set, a missing TLS variable or unreadable file fails the function's startup.
 Only `EventGroup`s of the request's `data_provider` are looked up. A failed lookup only skips
 attribution; it never fails the query.

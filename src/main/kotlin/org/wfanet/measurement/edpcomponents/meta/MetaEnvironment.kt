@@ -65,24 +65,24 @@ internal object MetaEnvironment {
 
   /**
    * Builds the [MetaAdAccountResolver] that reads ad accounts from CMMS `EventGroup`s, or returns
-   * null when `CMMS_KINGDOM_TARGET` is unset or blank, in which case only accounts the Meta client
+   * null when `KINGDOM_TARGET` is unset or blank, in which case only accounts the Meta client
    * resolves are recorded.
    *
    * The function authenticates to the Kingdom as Meta's `DataProvider` over mutual TLS, using the
    * files named by `CMMS_TLS_CERT_FILE` (certificate chain, PEM), `CMMS_TLS_KEY_FILE` (PKCS #8
    * private key, PEM) and `CMMS_TRUSTED_CERTS_FILE` (trusted root certificates, PEM), typically
-   * Secret Manager secrets mounted as files. With `CMMS_KINGDOM_TARGET` set, a missing or
-   * unreadable file is a misconfiguration and fails the function's startup.
-   * `CMMS_KINGDOM_CERT_HOST` optionally overrides the host name expected in the Kingdom's
-   * certificate, and `CMMS_REQUEST_TIMEOUT_SECONDS` the deadline of each lookup.
+   * Secret Manager secrets mounted as files. With `KINGDOM_TARGET` set, a missing or unreadable
+   * file is a misconfiguration and fails the function's startup. `KINGDOM_CERT_HOST` optionally
+   * overrides the host name expected in the Kingdom's certificate, and
+   * `CMMS_REQUEST_TIMEOUT_SECONDS` the deadline of each lookup.
    *
    * The channel is built with Netty directly because common-jvm's mutual TLS helpers are not
    * published to Maven.
    */
   fun cmmsAdAccountResolver(): MetaAdAccountResolver? {
-    val target = nonBlankEnv("CMMS_KINGDOM_TARGET") ?: return null
+    val target = nonBlankEnv("KINGDOM_TARGET") ?: return null
     fun requiredFile(name: String) =
-      File(nonBlankEnv(name) ?: error("$name not set (required with CMMS_KINGDOM_TARGET)"))
+      File(nonBlankEnv(name) ?: error("$name not set (required with KINGDOM_TARGET)"))
     val sslContext =
       GrpcSslContexts.forClient()
         .keyManager(requiredFile("CMMS_TLS_CERT_FILE"), requiredFile("CMMS_TLS_KEY_FILE"))
@@ -93,7 +93,7 @@ internal object MetaEnvironment {
         .sslContext(sslContext)
         .defaultServiceConfig(KINGDOM_SERVICE_CONFIG)
         .enableRetry()
-    val certHost = nonBlankEnv("CMMS_KINGDOM_CERT_HOST")
+    val certHost = nonBlankEnv("KINGDOM_CERT_HOST")
     if (certHost != null) {
       channelBuilder.overrideAuthority(certHost)
     }

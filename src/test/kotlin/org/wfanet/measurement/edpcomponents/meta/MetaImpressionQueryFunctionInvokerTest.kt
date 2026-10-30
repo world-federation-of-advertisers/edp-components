@@ -89,17 +89,17 @@ class MetaImpressionQueryFunctionInvokerTest {
   }
 
   @Test
-  fun `treats a blank CMMS_KINGDOM_TARGET as unset`() {
+  fun `treats a blank KINGDOM_TARGET as unset`() {
     // No TLS files are configured, so the function would fail to start if it used the target.
-    assertThat(queryFunction(mapOf("CMMS_KINGDOM_TARGET" to ""))).isEqualTo(502)
+    assertThat(queryFunction(mapOf("KINGDOM_TARGET" to ""))).isEqualTo(502)
   }
 
   @Test
-  fun `fails to start when CMMS_KINGDOM_TARGET is set without the TLS files`() {
+  fun `fails to start when KINGDOM_TARGET is set without the TLS files`() {
     // A misconfigured Kingdom connection fails the deployment rather than silently disabling
     // attribution.
     assertFailsWith<IllegalStateException> {
-      queryFunction(mapOf("CMMS_KINGDOM_TARGET" to "localhost:1"))
+      queryFunction(mapOf("KINGDOM_TARGET" to "localhost:1"))
     }
   }
 
