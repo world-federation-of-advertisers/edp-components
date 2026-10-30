@@ -27,6 +27,7 @@ import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponseKt.impressionCount
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponseKt.skipDetail
+import org.wfanet.measurement.api.v2alpha.ImpressionQuery
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
 
 /**
@@ -47,21 +48,24 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  *
  * Each query also records the access it observed to the ad accounts involved (see
  * [MetaImpressionQueryMetrics.recordAccountAccess]), so onboarding gaps show per account without a
- * separate check. An account is known from an account-level entity, or once the client has resolved
- * the entity's account. Meta does not reveal the account behind an entity it hides from the token,
- * so such a refusal is counted only by outcome. Refusals are never cached: a denied account is
- * queried again on its next report, so newly granted access is observed.
+ * separate check. An account is known from an account-level entity, once the client has resolved
+ * the entity's account, or, for an entity Meta hides from the token, from the `ad_account_id` in
+ * the entity's `EventGroup`, looked up with `GetEventGroup` (see [MetaAdAccountResolver]). Refusals
+ * are never cached: a denied account is queried again on its next report, so newly granted access
+ * is observed.
  */
 class MetaImpressionQueryFunction(
   private val insightsClient: MetaInsightsClient,
   private val metrics: MetaImpressionQueryMetrics,
   private val flushTelemetry: () -> Unit,
   private val clock: Clock,
+  private val adAccountResolver: MetaAdAccountResolver?,
 ) : HttpFunction {
 
   /**
    * Builds the function from its environment, as the Functions Framework does. See
-   * [MetaEnvironment.marketingApiClient] for the Meta credentials.
+   * [MetaEnvironment.marketingApiClient] for the Meta credentials and
+   * [MetaEnvironment.cmmsAdAccountResolver] for the optional CMMS connection.
    */
   constructor() :
     this(
@@ -69,6 +73,7 @@ class MetaImpressionQueryFunction(
       metrics = MetaImpressionQueryMetrics(MetaTelemetry.meter),
       flushTelemetry = { MetaTelemetry.flush() },
       clock = Clock.systemUTC(),
+      adAccountResolver = MetaEnvironment.cmmsAdAccountResolver(),
     )
 
   override fun service(request: HttpRequest, response: HttpResponse) {
@@ -128,8 +133,9 @@ class MetaImpressionQueryFunction(
     // Route each entity to its Meta Insights target by entity_type. An unsupported type skips the
     // whole request: a partial sum over only the supported entities would be a wrong number, not a
     // valid smaller one.
-    val targets = ArrayList<MetaInsightsTarget>(request.query.entityKeysList.size)
-    for (entityKey in request.query.entityKeysList) {
+    val targets = ArrayList<MetaInsightsTarget>(request.query.entitiesCount)
+    for (entity in request.query.entitiesList) {
+      val entityKey = entity.entityKey
       val entityLevel =
         MetaEntityLevels[entityKey.entityType]
           ?: return skip(
@@ -168,6 +174,7 @@ class MetaImpressionQueryFunction(
       // so this is often an advertiser not yet onboarded.
       logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
       recordRefusal(
+        request.query.entitiesList.getOrNull(succeeded.size),
         targets.getOrNull(succeeded.size),
         MetaImpressionQueryMetrics.AccountAccess.INACCESSIBLE,
         e.nodeId,
@@ -180,6 +187,7 @@ class MetaImpressionQueryFunction(
       throw e
     } catch (e: MetaPermissionDeniedException) {
       recordRefusal(
+        request.query.entitiesList.getOrNull(succeeded.size),
         targets.getOrNull(succeeded.size),
         MetaImpressionQueryMetrics.AccountAccess.PERMISSION_DENIED,
         e.nodeId,
@@ -222,18 +230,36 @@ class MetaImpressionQueryFunction(
 
   /**
    * Records [access] for the ad account Meta refused: the account named by [refusedNodeId] if it is
-   * an ad account, otherwise the known account of the [failed] target. Nothing is recorded when the
-   * account is unknown, as it is for an entity Meta hides from the token.
+   * an ad account, otherwise the known account of the [failed] target, otherwise the account in the
+   * `EventGroup` of [failedEntity], which is how an entity Meta hides from the token is attributed.
+   * Nothing is recorded when the account cannot be determined.
    */
   private fun recordRefusal(
+    failedEntity: ImpressionQuery.Entity?,
     failed: MetaInsightsTarget?,
     access: MetaImpressionQueryMetrics.AccountAccess,
     refusedNodeId: String,
   ) {
     val accountId =
       if (refusedNodeId.startsWith(ACCOUNT_PREFIX)) refusedNodeId.removePrefix(ACCOUNT_PREFIX)
-      else failed?.let { insightsClient.knownAdAccountId(it) }
+      else
+        failed?.let { insightsClient.knownAdAccountId(it) }
+          ?: failedEntity?.let { eventGroupAdAccountId(it) }
     recordAccountAccess(setOfNotNull(accountId), access)
+  }
+
+  /**
+   * Returns the ad account recorded in [entity]'s `EventGroup`, or null if it names none, no
+   * resolver is configured, or the lookup fails. A failed lookup never fails the query.
+   */
+  private fun eventGroupAdAccountId(entity: ImpressionQuery.Entity): String? {
+    if (adAccountResolver == null || entity.eventGroup.isEmpty()) return null
+    return try {
+      adAccountResolver.adAccountIdOf(entity.eventGroup, entity.entityKey)
+    } catch (e: Exception) {
+      logger.log(Level.WARNING, "Could not resolve the ad account of ${entity.eventGroup}", e)
+      null
+    }
   }
 
   private fun recordAccountAccess(
@@ -249,8 +275,8 @@ class MetaImpressionQueryFunction(
   /** The [MetaImpressionQueryMetrics.ENTITY_TYPE] label for [request]'s entities. */
   private fun entityTypeLabel(request: DataProviderImpressionQueryRequest): String {
     val levels =
-      request.query.entityKeysList
-        .map { MetaEntityLevels[it.entityType]?.level ?: UNSUPPORTED_ENTITY_TYPE }
+      request.query.entitiesList
+        .map { MetaEntityLevels[it.entityKey.entityType]?.level ?: UNSUPPORTED_ENTITY_TYPE }
         .distinct()
     return when {
       levels.isEmpty() -> UNKNOWN_ENTITY_TYPE

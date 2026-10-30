@@ -10,7 +10,7 @@ bazel_dep(name = "rules_jvm_external", version = "6.8")
 bazel_dep(name = "rules_kotlin_jvm", version = "0.13.0", repo_name = "wfa_rules_kotlin_jvm")
 bazel_dep(
     name = "cross-media-measurement-api",
-    version = "0.95.0",
+    version = "0.106.0",
     repo_name = "cross_media_measurement_api",
 )
 
@@ -25,6 +25,8 @@ maven.install(
         "com.google.guava:guava:33.4.0-jre",
         "com.google.protobuf:protobuf-java:4.33.6",
         "com.google.truth:truth:1.4.4",
+        "io.grpc:grpc-inprocess:1.77.0",
+        "io.grpc:grpc-netty-shaded:1.77.0",
         "io.opentelemetry:opentelemetry-api",
         "io.opentelemetry:opentelemetry-sdk",
         "io.opentelemetry:opentelemetry-sdk-common",
@@ -34,6 +36,7 @@ maven.install(
         "junit:junit:4.13.2",
         "org.jetbrains.kotlin:kotlin-reflect:2.2.21",
         "org.jetbrains.kotlin:kotlin-test:2.2.21",
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0",
         "org.wfanet.measurement:common-testing:0.159.0",
     ],
     boms = ["io.opentelemetry:opentelemetry-bom:1.42.1"],

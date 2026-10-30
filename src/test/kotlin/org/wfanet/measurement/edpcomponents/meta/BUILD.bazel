@@ -17,6 +17,7 @@ kt_jvm_test(
     srcs = ["MetaImpressionQueryFunctionTest.kt"],
     test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionTest",
     deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_group_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
         "@maven//:com_google_protobuf_protobuf_java",
@@ -39,6 +40,7 @@ kt_jvm_test(
     ],
     test_class = "org.wfanet.measurement.edpcomponents.meta.DeployedFunctionTest",
     deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_group_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
         "@maven//:com_google_protobuf_protobuf_java",
@@ -95,6 +97,7 @@ kt_jvm_test(
     data = [":InvokeMetaImpressionQueryFunction"],
     test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionDeployJarTest",
     deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_group_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
         "@maven//:com_google_protobuf_protobuf_java",
         "@maven//:com_google_truth_truth",
@@ -110,11 +113,28 @@ kt_jvm_test(
     data = [":InvokeMetaImpressionQueryFunction"],
     test_class = "org.wfanet.measurement.edpcomponents.meta.MetaImpressionQueryFunctionInvokerTest",
     deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_group_kt_jvm_proto",
         "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:data_provider_impression_query_kt_jvm_proto",
         "@maven//:com_google_protobuf_protobuf_java",
         "@maven//:com_google_truth_truth",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core",
         "@maven//:org_wfanet_measurement_common_testing",
+    ],
+)
+
+kt_jvm_test(
+    name = "CmmsEventGroupAdAccountResolverTest",
+    srcs = ["CmmsEventGroupAdAccountResolverTest.kt"],
+    test_class = "org.wfanet.measurement.edpcomponents.meta.CmmsEventGroupAdAccountResolverTest",
+    deps = [
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_group_kt_jvm_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:event_groups_service_kt_jvm_grpc_proto",
+        "//src/main/kotlin/org/wfanet/measurement/edpcomponents/meta:meta_impression_query",
+        "@maven//:com_google_protobuf_protobuf_java",
+        "@maven//:com_google_truth_truth",
+        "@maven//:io_grpc_grpc_api",
+        "@maven//:io_grpc_grpc_inprocess",
+        "@maven//:junit_junit",
     ],
 )

@@ -39,7 +39,9 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
-import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.EventGroup
+import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entity
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.eventFilter
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
@@ -53,8 +55,11 @@ class MetaImpressionQueryFunctionTest {
     )
   private var flushes = 0
 
+  /** Resolver the function under test uses for `EventGroup` accounts; null means none. */
+  private var adAccountResolver: MetaAdAccountResolver? = null
+
   private fun newFunction(insightsClient: MetaInsightsClient) =
-    MetaImpressionQueryFunction(insightsClient, metrics, { flushes++ }, CLOCK)
+    MetaImpressionQueryFunction(insightsClient, metrics, { flushes++ }, CLOCK, adAccountResolver)
 
   /** Query counts recorded, by (outcome, entity type). */
   private fun recordedQueries(): Map<Pair<String?, String?>, Long> =
@@ -420,10 +425,12 @@ class MetaImpressionQueryFunctionTest {
       request(entityIds = listOf("111"))
         .toBuilder()
         .apply {
-          queryBuilder.addEntityKeys(
-            entityKey {
-              entityType = "ad_account"
-              entityId = "888"
+          queryBuilder.addEntities(
+            entity {
+              entityKey = entityKey {
+                entityType = "ad_account"
+                entityId = "888"
+              }
             }
           )
         }
@@ -480,6 +487,63 @@ class MetaImpressionQueryFunctionTest {
     // A throttle says nothing about the throttled account, so only the succeeded one is recorded.
     assertThat(httpResponse.statusCode).isEqualTo(429)
     assertThat(recordedAccountAccess()).containsExactly(Pair("999", "accessible"), NOW_SECONDS)
+  }
+
+  @Test
+  fun `service records the EventGroup account of an entity Meta hides`() {
+    val lookups = mutableListOf<Pair<String, EventGroup.EntityKey>>()
+    adAccountResolver = MetaAdAccountResolver { eventGroup, entityKey ->
+      lookups += eventGroup to entityKey
+      "999"
+    }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
+      requestWithEventGroup().toByteArray(),
+    )
+
+    assertThat(recordedQueries()).containsExactly(Pair("entity_not_found", "campaign"), 1L)
+    assertThat(recordedAccountAccess()).containsExactly(Pair("999", "inaccessible"), NOW_SECONDS)
+    assertThat(lookups)
+      .containsExactly(
+        EVENT_GROUP_NAME to
+          entityKey {
+            entityType = "campaign"
+            entityId = "111"
+          }
+      )
+  }
+
+  @Test
+  fun `service prefers the account the client resolved over a lookup`() {
+    var lookedUp = false
+    adAccountResolver = MetaAdAccountResolver { _, _ ->
+      lookedUp = true
+      "777"
+    }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "111")).apply {
+        knownAdAccounts["111"] = "999"
+      },
+      requestWithEventGroup().toByteArray(),
+    )
+
+    assertThat(recordedAccountAccess())
+      .containsExactly(Pair("999", "permission_denied"), NOW_SECONDS)
+    assertThat(lookedUp).isFalse()
+  }
+
+  @Test
+  fun `service still skips when the EventGroup lookup fails`() {
+    adAccountResolver = MetaAdAccountResolver { _, _ -> throw IllegalStateException("unreachable") }
+
+    val response =
+      newFunction(FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")))
+        .handle(requestWithEventGroup())
+
+    assertThat(response.skipped.reason).isEqualTo(SkipReason.ENTITY_NOT_FOUND)
+    assertThat(recordedAccountAccess()).isEmpty()
   }
 
   @Test
@@ -546,10 +610,12 @@ class MetaImpressionQueryFunctionTest {
       request(entityIds = listOf("111"))
         .toBuilder()
         .apply {
-          queryBuilder.addEntityKeys(
-            entityKey {
-              entityType = "ad_set"
-              entityId = "222"
+          queryBuilder.addEntities(
+            entity {
+              entityKey = entityKey {
+                entityType = "ad_set"
+                entityId = "222"
+              }
             }
           )
         }
@@ -614,9 +680,11 @@ class MetaImpressionQueryFunctionTest {
     dataProvider = "dataProviders/edp-meta"
     query = impressionQuery {
       for (id in entityIds) {
-        entityKeys += entityKey {
-          this.entityType = entityType
-          entityId = id
+        entities += entity {
+          entityKey = entityKey {
+            this.entityType = entityType
+            entityId = id
+          }
         }
       }
       timeInterval = interval {
@@ -627,7 +695,15 @@ class MetaImpressionQueryFunctionTest {
     }
   }
 
+  /** A request for campaign 111 whose entity names [EVENT_GROUP_NAME]. */
+  private fun requestWithEventGroup() =
+    request(entityIds = listOf("111"))
+      .toBuilder()
+      .apply { queryBuilder.entitiesBuilderList.single().eventGroup = EVENT_GROUP_NAME }
+      .build()
+
   companion object {
+    private const val EVENT_GROUP_NAME = "dataProviders/edp-meta/eventGroups/eg-111"
     private const val REQUEST_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
     private const val NOW_SECONDS = 1_760_000_000L
     private val CLOCK: Clock = Clock.fixed(Instant.ofEpochSecond(NOW_SECONDS), ZoneOffset.UTC)

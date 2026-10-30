@@ -216,7 +216,8 @@ Each query also records the access it observed to its ad accounts in the
 `inaccessible`. An account's current access is the result with the latest time. An account is known
 from an account-level entity, or once the client has resolved the entity's account. Meta does not
 reveal the account behind an entity it hides from the token, so such a refusal is counted only by
-outcome (see #27 for resolving it from the `EventGroup`). Throttles, rejected credentials
+outcome unless the entity names its `EventGroup`: then the function looks the `EventGroup` up with
+`GetEventGroup` and records the `ad_account_id` in its `entity_metadata`. Throttles, rejected credentials
 and other failures leave an account's access unchanged, and an account no report has queried yet
 has no points. Refusals are not cached, so a denied account is queried again on its next report and
 newly granted access shows up.
@@ -226,6 +227,16 @@ Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME` (for
 them. OpenTelemetry exporters default to `none`, so without `OTEL_METRICS_EXPORTER` nothing is
 exported. The metric names and attributes are also used by cross-media-measurement's
 `meta_impression_query_dashboard.json`; change both together.
+
+## Resolving accounts from EventGroups
+
+To attribute entities Meta hides, the function calls the CMMS `GetEventGroup` method as Meta's
+`DataProvider` over mutual TLS. Set `CMMS_KINGDOM_TARGET` (the Kingdom public API, `host:port`) and
+mount the `DataProvider`'s TLS certificate, PKCS #8 private key and trusted root certificates as
+files named by `CMMS_TLS_CERT_FILE`, `CMMS_TLS_KEY_FILE` and `CMMS_TRUSTED_CERTS_FILE`, for example
+with `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `CMMS_KINGDOM_CERT_HOST` optionally
+overrides the host name expected in the Kingdom's certificate. Without `CMMS_KINGDOM_TARGET`, no
+lookups are made. A failed lookup only skips attribution; it never fails the query.
 
 ## Status
 

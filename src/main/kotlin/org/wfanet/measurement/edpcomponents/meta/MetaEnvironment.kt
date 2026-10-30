@@ -16,6 +16,12 @@
 
 package org.wfanet.measurement.edpcomponents.meta
 
+import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
+import java.io.File
+import java.time.Duration
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
+
 /** Reads the Meta Cloud Function's configuration from its environment. */
 internal object MetaEnvironment {
   /**
@@ -55,4 +61,35 @@ internal object MetaEnvironment {
       )
     }
   }
+
+  /**
+   * Builds the [MetaAdAccountResolver] that reads ad accounts from CMMS `EventGroup`s, or returns
+   * null when `CMMS_KINGDOM_TARGET` is unset, in which case only accounts the Meta client resolves
+   * are recorded.
+   *
+   * The function authenticates to the Kingdom as Meta's `DataProvider` over mutual TLS, using the
+   * files named by `CMMS_TLS_CERT_FILE` (certificate chain, PEM), `CMMS_TLS_KEY_FILE` (PKCS #8
+   * private key, PEM) and `CMMS_TRUSTED_CERTS_FILE` (trusted root certificates, PEM), typically
+   * Secret Manager secrets mounted as files. `CMMS_KINGDOM_CERT_HOST` optionally overrides the host
+   * name expected in the Kingdom's certificate.
+   */
+  fun cmmsAdAccountResolver(): MetaAdAccountResolver? {
+    val target = System.getenv("CMMS_KINGDOM_TARGET") ?: return null
+    fun requiredFile(name: String) =
+      File(System.getenv(name) ?: error("$name not set (required with CMMS_KINGDOM_TARGET)"))
+    val sslContext =
+      GrpcSslContexts.forClient()
+        .keyManager(requiredFile("CMMS_TLS_CERT_FILE"), requiredFile("CMMS_TLS_KEY_FILE"))
+        .trustManager(requiredFile("CMMS_TRUSTED_CERTS_FILE"))
+        .build()
+    val channelBuilder = NettyChannelBuilder.forTarget(target).sslContext(sslContext)
+    System.getenv("CMMS_KINGDOM_CERT_HOST")?.let { channelBuilder.overrideAuthority(it) }
+    return CmmsEventGroupAdAccountResolver(
+      EventGroupsCoroutineStub(channelBuilder.build()),
+      CMMS_REQUEST_TIMEOUT,
+    )
+  }
+
+  // Short, because a lookup runs inside the function's request timeout.
+  private val CMMS_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
 }
