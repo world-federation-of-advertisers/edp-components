@@ -27,13 +27,15 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertFailsWith
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
-import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entity
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 import org.wfanet.measurement.gcloud.testing.FunctionsFrameworkInvokerProcess
@@ -73,7 +75,7 @@ class MetaImpressionQueryFunctionInvokerTest {
 
   @Test
   fun `returns 502 at the function boundary when Meta rejects the credentials`() {
-    assertThat(queryFunction()).isEqualTo(502)
+    assertThat(queryFunction(emptyMap())).isEqualTo(502)
     // The 502 came from Meta rejecting the token, not from a failure before Meta was called.
     assertThat(metaRequests.get()).isGreaterThan(0)
   }
@@ -82,12 +84,30 @@ class MetaImpressionQueryFunctionInvokerTest {
   fun `returns 403 at the function boundary when Meta denies access to the ad account`() {
     metaErrorBody = PERMISSION_ERROR_BODY
 
-    assertThat(queryFunction()).isEqualTo(403)
+    assertThat(queryFunction(emptyMap())).isEqualTo(403)
     assertThat(metaRequests.get()).isGreaterThan(0)
   }
 
-  /** Starts the function against the fake Graph API, sends one query, and returns its status. */
-  private fun queryFunction(): Int {
+  @Test
+  fun `treats a blank KINGDOM_TARGET as unset`() {
+    // No TLS files are configured, so the function would fail to start if it used the target.
+    assertThat(queryFunction(mapOf("KINGDOM_TARGET" to ""))).isEqualTo(502)
+  }
+
+  @Test
+  fun `fails to start when KINGDOM_TARGET is set without the TLS files`() {
+    // A misconfigured Kingdom connection fails the deployment rather than silently disabling
+    // attribution.
+    assertFailsWith<IllegalStateException> {
+      queryFunction(mapOf("KINGDOM_TARGET" to "localhost:1"))
+    }
+  }
+
+  /**
+   * Starts the function against the fake Graph API with [extraEnv] added to its environment, sends
+   * one query, and returns its status.
+   */
+  private fun queryFunction(extraEnv: Map<String, String>): Int {
     functionProcess =
       FunctionsFrameworkInvokerProcess(
         javaBinaryPath = FUNCTION_BINARY_PATH,
@@ -99,7 +119,7 @@ class MetaImpressionQueryFunctionInvokerTest {
           "META_ACCESS_TOKEN" to "dummy-token",
           "META_APP_SECRET" to "dummy-secret",
           "META_GRAPH_API_BASE" to "http://127.0.0.1:${metaServer.address.port}",
-        )
+        ) + extraEnv
       )
     }
 
@@ -144,9 +164,11 @@ class MetaImpressionQueryFunctionInvokerTest {
       requestId = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
       dataProvider = "dataProviders/edp-meta"
       query = impressionQuery {
-        entityKeys += entityKey {
-          entityType = "campaign"
-          entityId = "111"
+        entities += entity {
+          entityKey = entityKey {
+            entityType = "campaign"
+            entityId = "111"
+          }
         }
         timeInterval = interval {
           startTime = timestamp { seconds = 1_700_000_000 }

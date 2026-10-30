@@ -1,5 +1,5 @@
 load("@rules_java//java:java_binary.bzl", "java_binary")
-load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_library", "kt_jvm_proto_library")
+load("@wfa_rules_kotlin_jvm//kotlin:defs.bzl", "kt_jvm_grpc_proto_library", "kt_jvm_library", "kt_jvm_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -12,9 +12,25 @@ kt_jvm_proto_library(
     ],
 )
 
+kt_jvm_proto_library(
+    name = "event_group_kt_jvm_proto",
+    deps = [
+        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_group_proto",
+    ],
+)
+
+# Client for the CMMS EventGroups service, used to resolve the ad account behind an entity.
+kt_jvm_grpc_proto_library(
+    name = "event_groups_service_kt_jvm_grpc_proto",
+    deps = [
+        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_groups_service_proto",
+    ],
+)
+
 kt_jvm_library(
     name = "meta_impression_query",
     srcs = [
+        "MetaAdAccountResolver.kt",
         "MetaEntityLevel.kt",
         "MetaEnvironment.kt",
         "MetaImpressionQueryFunction.kt",
@@ -27,9 +43,13 @@ kt_jvm_library(
     runtime_deps = ["@maven//:com_google_cloud_opentelemetry_exporter_auto"],
     deps = [
         ":data_provider_impression_query_kt_jvm_proto",
+        ":event_group_kt_jvm_proto",
+        ":event_groups_service_kt_jvm_grpc_proto",
         "@maven//:com_google_cloud_functions_functions_framework_api",
         "@maven//:com_google_code_gson_gson",
         "@maven//:com_google_protobuf_protobuf_java",
+        "@maven//:io_grpc_grpc_api",
+        "@maven//:io_grpc_grpc_netty_shaded",
         "@maven//:io_opentelemetry_opentelemetry_api",
         "@maven//:io_opentelemetry_opentelemetry_sdk",
         "@maven//:io_opentelemetry_opentelemetry_sdk_common",
