@@ -9,7 +9,7 @@ matching this filter?" — nothing more. All comparison/verdict logic lives in R
 ## Contract
 
 - **Request** `DataProviderImpressionQueryRequest` (binary proto): `request_id`, `data_provider`,
-  `query { event_groups[], time_interval, filter.expression (CEL) }`.
+  `query { entities[] { entity_key, event_group }, time_interval, filter.expression (CEL) }`.
 - **Response** `DataProviderImpressionQueryResponse`: `request_id` + `oneof { result (ImpressionCount)
   | skipped (SkipDetail{reason, detail}) }`.
 - **Skip reasons**: `FILTER_NOT_SUPPORTED`, `ENTITY_NOT_FOUND`, `API_ERROR`.
@@ -21,7 +21,7 @@ Bazel registry).
 ## Flow
 
 1. Parse the binary-proto request.
-2. `MetaEntityLevels` — route each EventGroup's `entity_key` by `entity_type` to a Graph node ID and Insights
+2. `MetaEntityLevels` — route each `entity_key` by `entity_type` to a Graph node ID and Insights
    `level`: `campaign`, `ad`/`creative` → `ad`, `ad_set`/`adset` → `adset`, `account`/`ad_account` →
    `account` (node prefixed `act_`). An unknown type skips the request.
 3. `translateFilter` — unfiltered only for now (empty or `true` expression); everything else →
@@ -217,10 +217,15 @@ Each query also records the access it observed to its ad accounts in the
 from an account-level entity, or once the client has resolved the entity's account. Meta does not
 reveal the account behind an entity it hides from the token, so such a refusal is counted only by
 outcome unless the entity names its `EventGroup`: then the function looks the `EventGroup` up with
-`GetEventGroup` and records the `ad_account_id` in its `entity_metadata`. Throttles, rejected credentials
-and other failures leave an account's access unchanged, and an account no report has queried yet
-has no points. Refusals are not cached, so a denied account is queried again on its next report and
-newly granted access shows up.
+`GetEventGroup` and records the `ad_account_id` in its `entity_metadata`. Throttles, rejected
+credentials and other failures leave an account's access unchanged, and an account no report has
+queried yet has no points. Refusals are not cached, so a denied account is queried again on its next
+report and newly granted access shows up.
+
+Each of those lookups is counted in the `meta.ad_account_lookup.lookups` counter, with attribute
+`outcome`: `resolved`, `unresolved` (the `EventGroup` names no account, is for another entity, or
+belongs to another `DataProvider`) or `failed` (for example, the Kingdom was unreachable). Alert on
+`failed`: a failed lookup only skips attribution, so the query outcome does not show it.
 
 Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME` (for example
 `meta.impression_query`), and grant the service account `roles/monitoring.metricWriter`, to export
@@ -235,8 +240,11 @@ To attribute entities Meta hides, the function calls the CMMS `GetEventGroup` me
 mount the `DataProvider`'s TLS certificate, PKCS #8 private key and trusted root certificates as
 files named by `CMMS_TLS_CERT_FILE`, `CMMS_TLS_KEY_FILE` and `CMMS_TRUSTED_CERTS_FILE`, for example
 with `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `CMMS_KINGDOM_CERT_HOST` optionally
-overrides the host name expected in the Kingdom's certificate. Without `CMMS_KINGDOM_TARGET`, no
-lookups are made. A failed lookup only skips attribution; it never fails the query.
+overrides the host name expected in the Kingdom's certificate, and `CMMS_REQUEST_TIMEOUT_SECONDS`
+(default 5) the deadline of each lookup. When `CMMS_KINGDOM_TARGET` is unset or blank, no lookups
+are made. When it is set, a missing TLS variable or unreadable file fails the function's startup.
+Only `EventGroup`s of the request's `data_provider` are looked up. A failed lookup only skips
+attribution; it never fails the query.
 
 ## Status
 

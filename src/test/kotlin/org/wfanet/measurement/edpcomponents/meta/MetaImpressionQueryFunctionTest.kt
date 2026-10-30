@@ -43,6 +43,7 @@ import org.wfanet.measurement.api.v2alpha.EventGroup
 import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entity
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.eventFilter
+import org.wfanet.measurement.api.v2alpha.copy
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 
@@ -72,6 +73,16 @@ class MetaImpressionQueryFunctionTest {
           point.attributes.get(MetaImpressionQueryMetrics.OUTCOME),
           point.attributes.get(MetaImpressionQueryMetrics.ENTITY_TYPE),
         ) to point.value
+      }
+
+  /** Ad account lookups recorded, by outcome. */
+  private fun recordedLookups(): Map<String?, Long> =
+    metricReader
+      .collectAllMetrics()
+      .filter { it.name == "meta.ad_account_lookup.lookups" }
+      .flatMap { it.longSumData.points }
+      .associate { point ->
+        point.attributes.get(MetaImpressionQueryMetrics.OUTCOME) to point.value
       }
 
   /** Last-observed times recorded, in epoch seconds, by (account ID, result). */
@@ -499,11 +510,12 @@ class MetaImpressionQueryFunctionTest {
 
     serve(
       FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
-      requestWithEventGroup().toByteArray(),
+      requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)).toByteArray(),
     )
 
     assertThat(recordedQueries()).containsExactly(Pair("entity_not_found", "campaign"), 1L)
     assertThat(recordedAccountAccess()).containsExactly(Pair("999", "inaccessible"), NOW_SECONDS)
+    assertThat(recordedLookups()).containsExactly("resolved", 1L)
     assertThat(lookups)
       .containsExactly(
         EVENT_GROUP_NAME to
@@ -526,7 +538,7 @@ class MetaImpressionQueryFunctionTest {
       FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "111")).apply {
         knownAdAccounts["111"] = "999"
       },
-      requestWithEventGroup().toByteArray(),
+      requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)).toByteArray(),
     )
 
     assertThat(recordedAccountAccess())
@@ -540,10 +552,151 @@ class MetaImpressionQueryFunctionTest {
 
     val response =
       newFunction(FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")))
-        .handle(requestWithEventGroup())
+        .handle(requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)))
 
     assertThat(response.skipped.reason).isEqualTo(SkipReason.ENTITY_NOT_FOUND)
     assertThat(recordedAccountAccess()).isEmpty()
+    assertThat(recordedLookups()).containsExactly("failed", 1L)
+  }
+
+  @Test
+  fun `service records the EventGroup account of the hidden entity among several`() {
+    val lookups = mutableListOf<Pair<String, EventGroup.EntityKey>>()
+    adAccountResolver = MetaAdAccountResolver { eventGroup, entityKey ->
+      lookups += eventGroup to entityKey
+      "888"
+    }
+    val fake =
+      FakeMetaInsightsClient(
+          result = 1L,
+          throwable = MetaPermissionDeniedException("no access", "222"),
+        )
+        .apply {
+          knownAdAccounts["111"] = "999"
+          throwingNodeId = "222"
+        }
+
+    serve(
+      fake,
+      requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME, "222" to OTHER_EVENT_GROUP_NAME))
+        .toByteArray(),
+    )
+
+    assertThat(lookups)
+      .containsExactly(
+        OTHER_EVENT_GROUP_NAME to
+          entityKey {
+            entityType = "campaign"
+            entityId = "222"
+          }
+      )
+    assertThat(recordedAccountAccess())
+      .containsExactly(
+        Pair("999", "accessible"),
+        NOW_SECONDS,
+        Pair("888", "permission_denied"),
+        NOW_SECONDS,
+      )
+  }
+
+  @Test
+  fun `service records the EventGroup account of a hidden entity Meta denies`() {
+    adAccountResolver = MetaAdAccountResolver { _, _ -> "999" }
+
+    val httpResponse =
+      serve(
+        FakeMetaInsightsClient(throwable = MetaPermissionDeniedException("no access", "111")),
+        requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)).toByteArray(),
+      )
+
+    assertThat(httpResponse.statusCode).isEqualTo(403)
+    assertThat(recordedAccountAccess())
+      .containsExactly(Pair("999", "permission_denied"), NOW_SECONDS)
+  }
+
+  @Test
+  fun `service records an unresolved lookup when the EventGroup names no account`() {
+    adAccountResolver = MetaAdAccountResolver { _, _ -> null }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
+      requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)).toByteArray(),
+    )
+
+    assertThat(recordedAccountAccess()).isEmpty()
+    assertThat(recordedLookups()).containsExactly("unresolved", 1L)
+  }
+
+  @Test
+  fun `service does not look up an EventGroup of another DataProvider`() {
+    var lookedUp = false
+    adAccountResolver = MetaAdAccountResolver { _, _ ->
+      lookedUp = true
+      "999"
+    }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
+      requestWithEventGroups(mapOf("111" to "measurementConsumers/mc-1/eventGroups/eg-111"))
+        .toByteArray(),
+    )
+
+    assertThat(lookedUp).isFalse()
+    assertThat(recordedAccountAccess()).isEmpty()
+    assertThat(recordedLookups()).containsExactly("unresolved", 1L)
+  }
+
+  @Test
+  fun `service does not look up an EventGroup when Meta names the refused ad account`() {
+    var lookedUp = false
+    adAccountResolver = MetaAdAccountResolver { _, _ ->
+      lookedUp = true
+      "777"
+    }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "act_999")),
+      requestWithEventGroups(mapOf("111" to EVENT_GROUP_NAME)).toByteArray(),
+    )
+
+    assertThat(lookedUp).isFalse()
+    assertThat(recordedAccountAccess()).containsExactly(Pair("999", "inaccessible"), NOW_SECONDS)
+    assertThat(recordedLookups()).isEmpty()
+  }
+
+  @Test
+  fun `service does not look up an entity that names no EventGroup`() {
+    var lookedUp = false
+    adAccountResolver = MetaAdAccountResolver { _, _ ->
+      lookedUp = true
+      "999"
+    }
+
+    serve(
+      FakeMetaInsightsClient(throwable = MetaEntityNotFoundException("nope", "111")),
+      request(entityIds = listOf("111")).toByteArray(),
+    )
+
+    assertThat(lookedUp).isFalse()
+    assertThat(recordedAccountAccess()).isEmpty()
+    assertThat(recordedLookups()).isEmpty()
+  }
+
+  @Test
+  fun `recordAccountAccess keeps the latest time when an older observation arrives later`() {
+    metrics.recordAccountAccess(
+      "999",
+      MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE,
+      Instant.ofEpochSecond(NOW_SECONDS),
+    )
+    // A slower concurrent request that observed the account earlier finishes afterwards.
+    metrics.recordAccountAccess(
+      "act_999",
+      MetaImpressionQueryMetrics.AccountAccess.ACCESSIBLE,
+      Instant.ofEpochSecond(NOW_SECONDS - 60),
+    )
+
+    assertThat(recordedAccountAccess()).containsExactly(Pair("999", "accessible"), NOW_SECONDS)
   }
 
   @Test
@@ -607,19 +760,17 @@ class MetaImpressionQueryFunctionTest {
   @Test
   fun `service records entities at several levels as mixed`() {
     val mixed =
-      request(entityIds = listOf("111"))
-        .toBuilder()
-        .apply {
-          queryBuilder.addEntities(
-            entity {
+      request(entityIds = listOf("111")).copy {
+        query =
+          query.copy {
+            entities += entity {
               entityKey = entityKey {
                 entityType = "ad_set"
                 entityId = "222"
               }
             }
-          )
-        }
-        .build()
+          }
+      }
 
     serve(FakeMetaInsightsClient(result = 1L), mixed.toByteArray())
 
@@ -695,15 +846,23 @@ class MetaImpressionQueryFunctionTest {
     }
   }
 
-  /** A request for campaign 111 whose entity names [EVENT_GROUP_NAME]. */
-  private fun requestWithEventGroup() =
-    request(entityIds = listOf("111"))
-      .toBuilder()
-      .apply { queryBuilder.entitiesBuilderList.single().eventGroup = EVENT_GROUP_NAME }
-      .build()
+  /** A request for the campaigns in [eventGroupByEntityId], each naming its `EventGroup`. */
+  private fun requestWithEventGroups(eventGroupByEntityId: Map<String, String>) =
+    request(entityIds = eventGroupByEntityId.keys.toList()).copy {
+      query =
+        query.copy {
+          val named =
+            entities.map {
+              it.copy { eventGroup = eventGroupByEntityId.getValue(entityKey.entityId) }
+            }
+          entities.clear()
+          entities += named
+        }
+    }
 
   companion object {
     private const val EVENT_GROUP_NAME = "dataProviders/edp-meta/eventGroups/eg-111"
+    private const val OTHER_EVENT_GROUP_NAME = "dataProviders/edp-meta/eventGroups/eg-222"
     private const val REQUEST_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
     private const val NOW_SECONDS = 1_760_000_000L
     private val CLOCK: Clock = Clock.fixed(Instant.ofEpochSecond(NOW_SECONDS), ZoneOffset.UTC)

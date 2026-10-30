@@ -19,9 +19,10 @@ package org.wfanet.measurement.edpcomponents.meta
 import io.opentelemetry.api.common.AttributeKey
 import io.opentelemetry.api.common.Attributes
 import io.opentelemetry.api.metrics.LongCounter
-import io.opentelemetry.api.metrics.LongGauge
 import io.opentelemetry.api.metrics.Meter
+import io.opentelemetry.api.metrics.ObservableLongGauge
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Metrics for [MetaImpressionQueryFunction]:
@@ -30,6 +31,8 @@ import java.time.Instant
  *   was last observed, in seconds since the epoch. An account's current access is the result with
  *   the latest time. It is updated only when a report queries the account, so an account no report
  *   has queried has no points yet.
+ * - `meta.ad_account_lookup.lookups`, one per lookup of the ad account in a refused entity's
+ *   `EventGroup`, keyed by [OUTCOME] ([LookupOutcome.label]).
  *
  * The names and attributes are also used by the Meta impression-query dashboard in
  * cross-media-measurement (`meta_impression_query_dashboard.json`); change both together.
@@ -42,13 +45,31 @@ class MetaImpressionQueryMetrics(meter: Meter) {
       .setUnit("{query}")
       .build()
 
-  private val accountAccessLastObserved: LongGauge =
+  private val adAccountLookups: LongCounter =
+    meter
+      .counterBuilder("meta.ad_account_lookup.lookups")
+      .setDescription("Lookups of the ad account in an entity's EventGroup, by outcome")
+      .setUnit("{lookup}")
+      .build()
+
+  /**
+   * Latest observation, in epoch seconds, of each ([ACCOUNT_ID], [RESULT]) pair. Kept as a maximum
+   * so that a slower concurrent request cannot replace a newer time with an older one.
+   */
+  private val lastObservedSeconds = ConcurrentHashMap<Attributes, Long>()
+
+  @Suppress("unused") // Kept so the callback stays registered.
+  private val accountAccessLastObserved: ObservableLongGauge =
     meter
       .gaugeBuilder("meta.account_access.last_observed")
       .ofLongs()
       .setDescription("When each Meta ad account access result was last observed")
       .setUnit("s")
-      .build()
+      .buildWithCallback { measurement ->
+        lastObservedSeconds.forEach { (attributes, seconds) ->
+          measurement.record(seconds, attributes)
+        }
+      }
 
   /** Records one query with [outcome] for entities of [entityType]. */
   fun recordQuery(outcome: Outcome, entityType: String) {
@@ -57,10 +78,16 @@ class MetaImpressionQueryMetrics(meter: Meter) {
 
   /** Records that a query observed [access] to the ad account [adAccountId] at [observedAt]. */
   fun recordAccountAccess(adAccountId: String, access: AccountAccess, observedAt: Instant) {
-    accountAccessLastObserved.set(
-      observedAt.epochSecond,
+    lastObservedSeconds.merge(
       Attributes.of(ACCOUNT_ID, adAccountId.removePrefix(ACCOUNT_PREFIX), RESULT, access.label),
+      observedAt.epochSecond,
+      ::maxOf,
     )
+  }
+
+  /** Records one lookup of an ad account in an `EventGroup` that ended with [outcome]. */
+  fun recordAdAccountLookup(outcome: LookupOutcome) {
+    adAccountLookups.add(1, Attributes.of(OUTCOME, outcome.label))
   }
 
   /** How an impression query ended, with the label it is recorded under. */
@@ -96,8 +123,23 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     INACCESSIBLE("inaccessible"),
   }
 
+  /**
+   * How a lookup of an ad account in an `EventGroup` ended, with the label it is recorded under.
+   */
+  enum class LookupOutcome(val label: String) {
+    /** The `EventGroup` named the entity's ad account. */
+    RESOLVED("resolved"),
+    /**
+     * The `EventGroup` names no ad account or is for another entity, or it belongs to another
+     * `DataProvider`, so it was not looked up.
+     */
+    UNRESOLVED("unresolved"),
+    /** The lookup failed, for example because the Kingdom was unreachable. */
+    FAILED("failed"),
+  }
+
   companion object {
-    /** [Outcome.label] of the query. */
+    /** [Outcome.label] of a query, or [LookupOutcome.label] of a lookup. */
     val OUTCOME: AttributeKey<String> = AttributeKey.stringKey("outcome")
     /**
      * Meta node level the request's entities are queried at (`campaign`, `adset`, `ad` or

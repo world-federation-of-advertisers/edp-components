@@ -17,22 +17,22 @@
 package org.wfanet.measurement.edpcomponents.meta
 
 import com.google.protobuf.Value
-import io.grpc.StatusException
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
-import java.util.logging.Level
 import java.util.logging.Logger
-import kotlinx.coroutines.runBlocking
 import org.wfanet.measurement.api.v2alpha.EventGroup
-import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpc.EventGroupsBlockingStub
 import org.wfanet.measurement.api.v2alpha.getEventGroupRequest
 
 /** Resolves the Meta ad account that owns an entity from the entity's `EventGroup`. */
 fun interface MetaAdAccountResolver {
   /**
    * Returns the ad account ID, without its `act_` prefix, recorded in the `EventGroup` named
-   * [eventGroupName] for the entity with [entityKey], or null if it cannot be determined.
+   * [eventGroupName] for the entity with [entityKey], or null if that `EventGroup` names no account
+   * or is for another entity.
+   *
+   * @throws io.grpc.StatusRuntimeException if the lookup fails
    */
   fun adAccountIdOf(eventGroupName: String, entityKey: EventGroup.EntityKey): String?
 }
@@ -40,32 +40,26 @@ fun interface MetaAdAccountResolver {
 /**
  * [MetaAdAccountResolver] that looks each `EventGroup` up with the CMMS `GetEventGroup` method and
  * reads the `ad_account_id` string from its `entity_metadata`. An `EventGroup` whose entity key
- * does not match the requested one is ignored. Accounts are cached for the life of the instance; a
- * failed lookup is retried on the next request.
+ * does not match the requested one is ignored. Resolved accounts are cached for the life of the
+ * instance; anything else is looked up again on the next request.
  */
 class CmmsEventGroupAdAccountResolver(
-  private val eventGroupsStub: EventGroupsCoroutineStub,
+  private val eventGroupsStub: EventGroupsBlockingStub,
   private val requestTimeout: Duration,
 ) : MetaAdAccountResolver {
-  private val adAccountIdByEventGroup =
-    ConcurrentHashMap<Pair<String, EventGroup.EntityKey>, String>()
+  /** Resolved ad account ID by the `EventGroup` and entity it was resolved for. */
+  private val adAccountIdByEventGroup = ConcurrentHashMap<CacheKey, String>()
 
   override fun adAccountIdOf(eventGroupName: String, entityKey: EventGroup.EntityKey): String? {
-    val cacheKey = eventGroupName to entityKey
-    adAccountIdByEventGroup[cacheKey]?.let {
-      return it
+    val cacheKey = CacheKey(eventGroupName, entityKey)
+    val cached: String? = adAccountIdByEventGroup[cacheKey]
+    if (cached != null) {
+      return cached
     }
     val eventGroup: EventGroup =
-      try {
-        runBlocking {
-          eventGroupsStub
-            .withDeadlineAfter(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
-            .getEventGroup(getEventGroupRequest { name = eventGroupName })
-        }
-      } catch (e: StatusException) {
-        logger.log(Level.WARNING, "GetEventGroup failed for $eventGroupName", e)
-        return null
-      }
+      eventGroupsStub
+        .withDeadlineAfter(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+        .getEventGroup(getEventGroupRequest { name = eventGroupName })
     if (eventGroup.entityKey != entityKey) {
       logger.warning(
         "EventGroup $eventGroupName has entity key ${eventGroup.entityKey}, not the requested " +
@@ -82,6 +76,8 @@ class CmmsEventGroupAdAccountResolver(
     adAccountIdByEventGroup[cacheKey] = adAccountId
     return adAccountId
   }
+
+  private data class CacheKey(val eventGroupName: String, val entityKey: EventGroup.EntityKey)
 
   companion object {
     private val logger = Logger.getLogger(CmmsEventGroupAdAccountResolver::class.java.name)

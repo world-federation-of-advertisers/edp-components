@@ -74,7 +74,7 @@ class MetaImpressionQueryFunctionInvokerTest {
 
   @Test
   fun `returns 502 at the function boundary when Meta rejects the credentials`() {
-    assertThat(queryFunction()).isEqualTo(502)
+    assertThat(queryFunction(emptyMap())).isEqualTo(502)
     // The 502 came from Meta rejecting the token, not from a failure before Meta was called.
     assertThat(metaRequests.get()).isGreaterThan(0)
   }
@@ -83,12 +83,21 @@ class MetaImpressionQueryFunctionInvokerTest {
   fun `returns 403 at the function boundary when Meta denies access to the ad account`() {
     metaErrorBody = PERMISSION_ERROR_BODY
 
-    assertThat(queryFunction()).isEqualTo(403)
+    assertThat(queryFunction(emptyMap())).isEqualTo(403)
     assertThat(metaRequests.get()).isGreaterThan(0)
   }
 
-  /** Starts the function against the fake Graph API, sends one query, and returns its status. */
-  private fun queryFunction(): Int {
+  @Test
+  fun `treats a blank CMMS_KINGDOM_TARGET as unset`() {
+    // No TLS files are configured, so the function would fail to start if it used the target.
+    assertThat(queryFunction(mapOf("CMMS_KINGDOM_TARGET" to ""))).isEqualTo(502)
+  }
+
+  /**
+   * Starts the function against the fake Graph API with [extraEnv] added to its environment, sends
+   * one query, and returns its status.
+   */
+  private fun queryFunction(extraEnv: Map<String, String>): Int {
     functionProcess =
       FunctionsFrameworkInvokerProcess(
         javaBinaryPath = FUNCTION_BINARY_PATH,
@@ -100,7 +109,7 @@ class MetaImpressionQueryFunctionInvokerTest {
           "META_ACCESS_TOKEN" to "dummy-token",
           "META_APP_SECRET" to "dummy-secret",
           "META_GRAPH_API_BASE" to "http://127.0.0.1:${metaServer.address.port}",
-        )
+        ) + extraEnv
       )
     }
 

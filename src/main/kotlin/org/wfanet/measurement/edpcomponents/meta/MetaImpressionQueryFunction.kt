@@ -35,10 +35,10 @@ import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryResponse
  * 2).
  *
  * A **dumb publisher-API adapter** (design doc §7): it parses a
- * [DataProviderImpressionQueryRequest] (binary proto), routes each EventGroup's entity key to a
- * Meta Insights target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to
- * a Meta demographic breakdown, queries the Marketing API Insights endpoint for the raw impression
- * count over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
+ * [DataProviderImpressionQueryRequest] (binary proto), routes each entity key to a Meta Insights
+ * target by its `entity_type` (via [MetaEntityLevels]), translates the CEL filter to a Meta
+ * demographic breakdown, queries the Marketing API Insights endpoint for the raw impression count
+ * over the interval, and returns a [DataProviderImpressionQueryResponse]. It performs no
  * comparison, no verdict, and no callback — that all lives in Results Fulfiller's
  * `EdpValidationPostProcessor`.
  *
@@ -174,6 +174,7 @@ class MetaImpressionQueryFunction(
       // so this is often an advertiser not yet onboarded.
       logger.log(Level.WARNING, "Meta entity not found for request ${request.requestId}", e)
       recordRefusal(
+        request.dataProvider,
         request.query.entitiesList.getOrNull(succeeded.size),
         targets.getOrNull(succeeded.size),
         MetaImpressionQueryMetrics.AccountAccess.INACCESSIBLE,
@@ -187,6 +188,7 @@ class MetaImpressionQueryFunction(
       throw e
     } catch (e: MetaPermissionDeniedException) {
       recordRefusal(
+        request.dataProvider,
         request.query.entitiesList.getOrNull(succeeded.size),
         targets.getOrNull(succeeded.size),
         MetaImpressionQueryMetrics.AccountAccess.PERMISSION_DENIED,
@@ -235,6 +237,7 @@ class MetaImpressionQueryFunction(
    * Nothing is recorded when the account cannot be determined.
    */
   private fun recordRefusal(
+    dataProvider: String,
     failedEntity: ImpressionQuery.Entity?,
     failed: MetaInsightsTarget?,
     access: MetaImpressionQueryMetrics.AccountAccess,
@@ -244,22 +247,40 @@ class MetaImpressionQueryFunction(
       if (refusedNodeId.startsWith(ACCOUNT_PREFIX)) refusedNodeId.removePrefix(ACCOUNT_PREFIX)
       else
         failed?.let { insightsClient.knownAdAccountId(it) }
-          ?: failedEntity?.let { eventGroupAdAccountId(it) }
+          ?: failedEntity?.let { eventGroupAdAccountId(dataProvider, it) }
     recordAccountAccess(setOfNotNull(accountId), access)
   }
 
   /**
    * Returns the ad account recorded in [entity]'s `EventGroup`, or null if it names none, no
-   * resolver is configured, or the lookup fails. A failed lookup never fails the query.
+   * resolver is configured, the `EventGroup` does not belong to [dataProvider], or the lookup
+   * fails. Each lookup is counted with [MetaImpressionQueryMetrics.recordAdAccountLookup].
    */
-  private fun eventGroupAdAccountId(entity: ImpressionQuery.Entity): String? {
-    if (adAccountResolver == null || entity.eventGroup.isEmpty()) return null
-    return try {
-      adAccountResolver.adAccountIdOf(entity.eventGroup, entity.entityKey)
-    } catch (e: Exception) {
-      logger.log(Level.WARNING, "Could not resolve the ad account of ${entity.eventGroup}", e)
-      null
+  private fun eventGroupAdAccountId(dataProvider: String, entity: ImpressionQuery.Entity): String? {
+    if (adAccountResolver == null || entity.eventGroup.isEmpty()) {
+      return null
     }
+    // The Kingdom lets a DataProvider read only its own EventGroups.
+    if (!entity.eventGroup.startsWith("$dataProvider/eventGroups/")) {
+      logger.warning("EventGroup ${entity.eventGroup} does not belong to $dataProvider")
+      metrics.recordAdAccountLookup(MetaImpressionQueryMetrics.LookupOutcome.UNRESOLVED)
+      return null
+    }
+    val adAccountId =
+      try {
+        adAccountResolver.adAccountIdOf(entity.eventGroup, entity.entityKey)
+      } catch (e: Exception) {
+        // Any failure, not only an RPC error, is contained: attribution is best effort and must
+        // never fail the query.
+        logger.log(Level.WARNING, "Could not resolve the ad account of ${entity.eventGroup}", e)
+        metrics.recordAdAccountLookup(MetaImpressionQueryMetrics.LookupOutcome.FAILED)
+        return null
+      }
+    metrics.recordAdAccountLookup(
+      if (adAccountId == null) MetaImpressionQueryMetrics.LookupOutcome.UNRESOLVED
+      else MetaImpressionQueryMetrics.LookupOutcome.RESOLVED
+    )
+    return adAccountId
   }
 
   private fun recordAccountAccess(

@@ -20,7 +20,8 @@ import io.grpc.netty.shaded.io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import java.io.File
 import java.time.Duration
-import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
+import java.util.concurrent.TimeUnit
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpc
 
 /** Reads the Meta Cloud Function's configuration from its environment. */
 internal object MetaEnvironment {
@@ -64,32 +65,80 @@ internal object MetaEnvironment {
 
   /**
    * Builds the [MetaAdAccountResolver] that reads ad accounts from CMMS `EventGroup`s, or returns
-   * null when `CMMS_KINGDOM_TARGET` is unset, in which case only accounts the Meta client resolves
-   * are recorded.
+   * null when `CMMS_KINGDOM_TARGET` is unset or blank, in which case only accounts the Meta client
+   * resolves are recorded.
    *
    * The function authenticates to the Kingdom as Meta's `DataProvider` over mutual TLS, using the
    * files named by `CMMS_TLS_CERT_FILE` (certificate chain, PEM), `CMMS_TLS_KEY_FILE` (PKCS #8
    * private key, PEM) and `CMMS_TRUSTED_CERTS_FILE` (trusted root certificates, PEM), typically
-   * Secret Manager secrets mounted as files. `CMMS_KINGDOM_CERT_HOST` optionally overrides the host
-   * name expected in the Kingdom's certificate.
+   * Secret Manager secrets mounted as files. With `CMMS_KINGDOM_TARGET` set, a missing or
+   * unreadable file is a misconfiguration and fails the function's startup.
+   * `CMMS_KINGDOM_CERT_HOST` optionally overrides the host name expected in the Kingdom's
+   * certificate, and `CMMS_REQUEST_TIMEOUT_SECONDS` the deadline of each lookup.
+   *
+   * The channel is built with Netty directly because common-jvm's mutual TLS helpers are not
+   * published to Maven.
    */
   fun cmmsAdAccountResolver(): MetaAdAccountResolver? {
-    val target = System.getenv("CMMS_KINGDOM_TARGET") ?: return null
+    val target = nonBlankEnv("CMMS_KINGDOM_TARGET") ?: return null
     fun requiredFile(name: String) =
-      File(System.getenv(name) ?: error("$name not set (required with CMMS_KINGDOM_TARGET)"))
+      File(nonBlankEnv(name) ?: error("$name not set (required with CMMS_KINGDOM_TARGET)"))
     val sslContext =
       GrpcSslContexts.forClient()
         .keyManager(requiredFile("CMMS_TLS_CERT_FILE"), requiredFile("CMMS_TLS_KEY_FILE"))
         .trustManager(requiredFile("CMMS_TRUSTED_CERTS_FILE"))
         .build()
-    val channelBuilder = NettyChannelBuilder.forTarget(target).sslContext(sslContext)
-    System.getenv("CMMS_KINGDOM_CERT_HOST")?.let { channelBuilder.overrideAuthority(it) }
-    return CmmsEventGroupAdAccountResolver(
-      EventGroupsCoroutineStub(channelBuilder.build()),
-      CMMS_REQUEST_TIMEOUT,
-    )
+    val channelBuilder =
+      NettyChannelBuilder.forTarget(target)
+        .sslContext(sslContext)
+        .defaultServiceConfig(KINGDOM_SERVICE_CONFIG)
+        .enableRetry()
+    val certHost = nonBlankEnv("CMMS_KINGDOM_CERT_HOST")
+    if (certHost != null) {
+      channelBuilder.overrideAuthority(certHost)
+    }
+    val channel = channelBuilder.build()
+    // Lets in-flight lookups finish when the instance shuts down.
+    Runtime.getRuntime()
+      .addShutdownHook(
+        Thread {
+          channel
+            .shutdown()
+            .awaitTermination(CHANNEL_SHUTDOWN_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+        }
+      )
+    val requestTimeout =
+      nonBlankEnv("CMMS_REQUEST_TIMEOUT_SECONDS")?.let { Duration.ofSeconds(it.toLong()) }
+        ?: DEFAULT_CMMS_REQUEST_TIMEOUT
+    return CmmsEventGroupAdAccountResolver(EventGroupsGrpc.newBlockingStub(channel), requestTimeout)
   }
 
+  /** The value of the environment variable [name], or null if it is unset or blank. */
+  private fun nonBlankEnv(name: String): String? = System.getenv(name)?.ifBlank { null }
+
   // Short, because a lookup runs inside the function's request timeout.
-  private val CMMS_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+  private val DEFAULT_CMMS_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+  private val CHANNEL_SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(1)
+
+  /**
+   * Retries a lookup the Kingdom was unavailable for, as common-jvm's default service config does.
+   * The request deadline still bounds the total time.
+   */
+  private val KINGDOM_SERVICE_CONFIG: Map<String, Any> =
+    mapOf(
+      "methodConfig" to
+        listOf(
+          mapOf(
+            "name" to listOf(mapOf("service" to "wfa.measurement.api.v2alpha.EventGroups")),
+            "retryPolicy" to
+              mapOf(
+                "maxAttempts" to 3.0,
+                "initialBackoff" to "0.1s",
+                "maxBackoff" to "1s",
+                "backoffMultiplier" to 2.0,
+                "retryableStatusCodes" to listOf("UNAVAILABLE"),
+              ),
+          )
+        )
+    )
 }

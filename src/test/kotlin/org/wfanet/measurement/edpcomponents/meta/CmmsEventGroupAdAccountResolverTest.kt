@@ -17,15 +17,18 @@
 package org.wfanet.measurement.edpcomponents.meta
 
 import com.google.common.truth.Truth.assertThat
-import com.google.protobuf.Struct
 import com.google.protobuf.Value
+import com.google.protobuf.struct
+import com.google.protobuf.value
 import io.grpc.ManagedChannel
 import io.grpc.Server
 import io.grpc.Status
 import io.grpc.StatusException
+import io.grpc.StatusRuntimeException
 import io.grpc.inprocess.InProcessChannelBuilder
 import io.grpc.inprocess.InProcessServerBuilder
 import java.time.Duration
+import kotlin.test.assertFailsWith
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -33,11 +36,11 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.EventGroup
 import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
-import org.wfanet.measurement.api.v2alpha.EventGroupMetadata
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpc
 import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineImplBase
-import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
 import org.wfanet.measurement.api.v2alpha.GetEventGroupRequest
 import org.wfanet.measurement.api.v2alpha.eventGroup
+import org.wfanet.measurement.api.v2alpha.eventGroupMetadata
 
 @RunWith(JUnit4::class)
 class CmmsEventGroupAdAccountResolverTest {
@@ -70,22 +73,22 @@ class CmmsEventGroupAdAccountResolverTest {
   }
 
   private fun newResolver() =
-    CmmsEventGroupAdAccountResolver(EventGroupsCoroutineStub(channel), Duration.ofSeconds(5))
+    CmmsEventGroupAdAccountResolver(EventGroupsGrpc.newBlockingStub(channel), Duration.ofSeconds(5))
 
-  private fun metaEventGroup(adAccountId: Value?): EventGroup = eventGroup {
+  /** A Meta `EventGroup` for [ENTITY_KEY] whose `entity_metadata` has [fields]. */
+  private fun metaEventGroup(fields: Map<String, Value>): EventGroup = eventGroup {
     name = EVENT_GROUP_NAME
     entityKey = ENTITY_KEY
-    if (adAccountId != null) {
-      eventGroupMetadata =
-        EventGroupMetadata.newBuilder()
-          .setEntityMetadata(Struct.newBuilder().putFields("ad_account_id", adAccountId))
-          .build()
+    eventGroupMetadata = eventGroupMetadata {
+      entityMetadata = struct { this.fields.putAll(fields) }
     }
   }
 
+  private fun stringValue(text: String) = value { stringValue = text }
+
   @Test
   fun `adAccountIdOf returns the account without its act_ prefix`() {
-    served = metaEventGroup(Value.newBuilder().setStringValue("act_999").build())
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_999")))
 
     assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
     assertThat(requestedNames).containsExactly(EVENT_GROUP_NAME)
@@ -93,7 +96,7 @@ class CmmsEventGroupAdAccountResolverTest {
 
   @Test
   fun `adAccountIdOf caches the account`() {
-    served = metaEventGroup(Value.newBuilder().setStringValue("999").build())
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
     val resolver = newResolver()
 
     resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
@@ -104,29 +107,57 @@ class CmmsEventGroupAdAccountResolverTest {
   }
 
   @Test
-  fun `adAccountIdOf returns null when the EventGroup has a different entity key`() {
-    served = metaEventGroup(Value.newBuilder().setStringValue("999").build())
-    val other = entityKey {
-      entityType = "campaign"
-      entityId = "222"
-    }
+  fun `adAccountIdOf does not serve a cached account for another entity key`() {
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
+    val resolver = newResolver()
+    resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
 
-    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, other)).isNull()
+    assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, OTHER_ENTITY_KEY)).isNull()
+    assertThat(requestedNames).hasSize(2)
+  }
+
+  @Test
+  fun `adAccountIdOf returns null when the EventGroup has a different entity key`() {
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
+
+    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, OTHER_ENTITY_KEY)).isNull()
   }
 
   @Test
   fun `adAccountIdOf returns null when the EventGroup names no account`() {
-    served = metaEventGroup(null)
+    served = metaEventGroup(emptyMap())
 
     assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
   }
 
   @Test
-  fun `adAccountIdOf returns null and retries later when the lookup fails`() {
+  fun `adAccountIdOf returns null when the account is not a string`() {
+    served = metaEventGroup(mapOf("ad_account_id" to value { numberValue = 999.0 }))
+
+    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
+  }
+
+  @Test
+  fun `adAccountIdOf returns null and does not cache an empty account`() {
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_")))
     val resolver = newResolver()
 
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
-    served = metaEventGroup(Value.newBuilder().setStringValue("999").build())
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_999")))
+    assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
+    assertThat(requestedNames).hasSize(2)
+  }
+
+  @Test
+  fun `adAccountIdOf throws when the lookup fails and looks up again later`() {
+    val resolver = newResolver()
+
+    val exception =
+      assertFailsWith<StatusRuntimeException> {
+        resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
+      }
+    assertThat(exception.status.code).isEqualTo(Status.Code.NOT_FOUND)
+    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
     assertThat(requestedNames).hasSize(2)
   }
@@ -136,6 +167,10 @@ class CmmsEventGroupAdAccountResolverTest {
     private val ENTITY_KEY = entityKey {
       entityType = "campaign"
       entityId = "111"
+    }
+    private val OTHER_ENTITY_KEY = entityKey {
+      entityType = "campaign"
+      entityId = "222"
     }
   }
 }
