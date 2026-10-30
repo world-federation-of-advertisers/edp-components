@@ -69,12 +69,12 @@ internal object MetaEnvironment {
    * resolves are recorded.
    *
    * The function authenticates to the Kingdom as Meta's `DataProvider` over mutual TLS, using the
-   * files named by `CMMS_TLS_CERT_FILE` (certificate chain, PEM), `CMMS_TLS_KEY_FILE` (PKCS #8
-   * private key, PEM) and `CMMS_TRUSTED_CERTS_FILE` (trusted root certificates, PEM), typically
-   * Secret Manager secrets mounted as files. With `KINGDOM_TARGET` set, a missing or unreadable
-   * file is a misconfiguration and fails the function's startup. `KINGDOM_CERT_HOST` optionally
-   * overrides the host name expected in the Kingdom's certificate, and
-   * `CMMS_REQUEST_TIMEOUT_SECONDS` the deadline of each lookup.
+   * files named by `TLS_CERT_FILE` (certificate chain, PEM), `TLS_KEY_FILE` (PKCS #8 private key,
+   * PEM) and `CERT_COLLECTION_FILE` (trusted root certificates, PEM), typically Secret Manager
+   * secrets mounted as files. With `KINGDOM_TARGET` set, a missing or unreadable file is a
+   * misconfiguration and fails the function's startup. `KINGDOM_CERT_HOST` optionally overrides the
+   * host name expected in the Kingdom's certificate, and `KINGDOM_REQUEST_TIMEOUT_SECONDS` the
+   * deadline of each lookup.
    *
    * The channel is built with Netty directly because common-jvm's mutual TLS helpers are not
    * published to Maven.
@@ -85,8 +85,8 @@ internal object MetaEnvironment {
       File(nonBlankEnv(name) ?: error("$name not set (required with KINGDOM_TARGET)"))
     val sslContext =
       GrpcSslContexts.forClient()
-        .keyManager(requiredFile("CMMS_TLS_CERT_FILE"), requiredFile("CMMS_TLS_KEY_FILE"))
-        .trustManager(requiredFile("CMMS_TRUSTED_CERTS_FILE"))
+        .keyManager(requiredFile("TLS_CERT_FILE"), requiredFile("TLS_KEY_FILE"))
+        .trustManager(requiredFile("CERT_COLLECTION_FILE"))
         .build()
     val channelBuilder =
       NettyChannelBuilder.forTarget(target)
@@ -108,8 +108,8 @@ internal object MetaEnvironment {
         }
       )
     val requestTimeout =
-      nonBlankEnv("CMMS_REQUEST_TIMEOUT_SECONDS")?.let { Duration.ofSeconds(it.toLong()) }
-        ?: DEFAULT_CMMS_REQUEST_TIMEOUT
+      nonBlankEnv("KINGDOM_REQUEST_TIMEOUT_SECONDS")?.let { Duration.ofSeconds(it.toLong()) }
+        ?: DEFAULT_KINGDOM_REQUEST_TIMEOUT
     return CmmsEventGroupAdAccountResolver(EventGroupsGrpc.newBlockingStub(channel), requestTimeout)
   }
 
@@ -117,7 +117,7 @@ internal object MetaEnvironment {
   private fun nonBlankEnv(name: String): String? = System.getenv(name)?.ifBlank { null }
 
   // Short, because a lookup runs inside the function's request timeout.
-  private val DEFAULT_CMMS_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+  private val DEFAULT_KINGDOM_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
   private val CHANNEL_SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(1)
 
   /**
