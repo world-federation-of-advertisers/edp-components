@@ -131,7 +131,8 @@ class MetaImpressionQueryMetrics(meter: Meter) {
     RESOLVED("resolved"),
     /**
      * The `EventGroup` names no ad account or is for another entity, or it belongs to another
-     * `DataProvider`, so it was not looked up.
+     * `DataProvider`, so it was not looked up. Each is logged with the `EventGroup`'s name, since
+     * it points at `EventGroup` metadata or a request to fix.
      */
     UNRESOLVED("unresolved"),
     /** The lookup failed, for example because the Kingdom was unreachable. */

@@ -72,8 +72,12 @@ class CmmsEventGroupAdAccountResolverTest {
     server.shutdownNow()
   }
 
-  private fun newResolver() =
-    CmmsEventGroupAdAccountResolver(EventGroupsGrpc.newBlockingStub(channel), Duration.ofSeconds(5))
+  private fun newResolver(adAccountIdKey: String) =
+    CmmsEventGroupAdAccountResolver(
+      EventGroupsGrpc.newBlockingStub(channel),
+      adAccountIdKey,
+      Duration.ofSeconds(5),
+    )
 
   /** A Meta `EventGroup` for [ENTITY_KEY] whose `entity_metadata` has [fields]. */
   private fun metaEventGroup(fields: Map<String, Value>): EventGroup = eventGroup {
@@ -87,17 +91,29 @@ class CmmsEventGroupAdAccountResolverTest {
   private fun stringValue(text: String) = value { stringValue = text }
 
   @Test
-  fun `adAccountIdOf returns the account without its act_ prefix`() {
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_999")))
+  fun `adAccountIdOf returns the account as recorded`() {
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("act_999")))
 
-    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
+    assertThat(newResolver(AD_ACCOUNT_ID_KEY).adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY))
+      .isEqualTo("act_999")
     assertThat(requestedNames).containsExactly(EVENT_GROUP_NAME)
   }
 
   @Test
+  fun `adAccountIdOf reads the account at the configured key`() {
+    served =
+      metaEventGroup(
+        mapOf(AD_ACCOUNT_ID_KEY to stringValue("999"), "meta_account" to stringValue("888"))
+      )
+
+    assertThat(newResolver("meta_account").adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY))
+      .isEqualTo("888")
+  }
+
+  @Test
   fun `adAccountIdOf caches the account`() {
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
-    val resolver = newResolver()
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("999")))
+    val resolver = newResolver(AD_ACCOUNT_ID_KEY)
 
     resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
     val second = resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
@@ -108,8 +124,8 @@ class CmmsEventGroupAdAccountResolverTest {
 
   @Test
   fun `adAccountIdOf does not serve a cached account for another entity key`() {
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
-    val resolver = newResolver()
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("999")))
+    val resolver = newResolver(AD_ACCOUNT_ID_KEY)
     resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
 
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, OTHER_ENTITY_KEY)).isNull()
@@ -118,51 +134,53 @@ class CmmsEventGroupAdAccountResolverTest {
 
   @Test
   fun `adAccountIdOf returns null when the EventGroup has a different entity key`() {
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("999")))
 
-    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, OTHER_ENTITY_KEY)).isNull()
+    assertThat(newResolver(AD_ACCOUNT_ID_KEY).adAccountIdOf(EVENT_GROUP_NAME, OTHER_ENTITY_KEY))
+      .isNull()
   }
 
   @Test
   fun `adAccountIdOf returns null when the EventGroup names no account`() {
     served = metaEventGroup(emptyMap())
 
-    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
+    assertThat(newResolver(AD_ACCOUNT_ID_KEY).adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
   }
 
   @Test
   fun `adAccountIdOf returns null when the account is not a string`() {
-    served = metaEventGroup(mapOf("ad_account_id" to value { numberValue = 999.0 }))
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to value { numberValue = 999.0 }))
 
-    assertThat(newResolver().adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
+    assertThat(newResolver(AD_ACCOUNT_ID_KEY).adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
   }
 
   @Test
   fun `adAccountIdOf returns null and does not cache an empty account`() {
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_")))
-    val resolver = newResolver()
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("")))
+    val resolver = newResolver(AD_ACCOUNT_ID_KEY)
 
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isNull()
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("act_999")))
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("999")))
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
     assertThat(requestedNames).hasSize(2)
   }
 
   @Test
   fun `adAccountIdOf throws when the lookup fails and looks up again later`() {
-    val resolver = newResolver()
+    val resolver = newResolver(AD_ACCOUNT_ID_KEY)
 
     val exception =
       assertFailsWith<StatusRuntimeException> {
         resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)
       }
     assertThat(exception.status.code).isEqualTo(Status.Code.NOT_FOUND)
-    served = metaEventGroup(mapOf("ad_account_id" to stringValue("999")))
+    served = metaEventGroup(mapOf(AD_ACCOUNT_ID_KEY to stringValue("999")))
     assertThat(resolver.adAccountIdOf(EVENT_GROUP_NAME, ENTITY_KEY)).isEqualTo("999")
     assertThat(requestedNames).hasSize(2)
   }
 
   companion object {
+    private const val AD_ACCOUNT_ID_KEY = "ad_account_id"
     private const val EVENT_GROUP_NAME = "dataProviders/edp-meta/eventGroups/eg-111"
     private val ENTITY_KEY = entityKey {
       entityType = "campaign"

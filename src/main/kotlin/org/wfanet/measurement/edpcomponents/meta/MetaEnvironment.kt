@@ -76,6 +76,10 @@ internal object MetaEnvironment {
    * host name expected in the Kingdom's certificate, and `KINGDOM_REQUEST_TIMEOUT_SECONDS` the
    * deadline of each lookup.
    *
+   * `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` names the key in each `EventGroup`'s `entity_metadata` that
+   * holds the ad account. The `DataProvider` defines that key, so it is required with
+   * `KINGDOM_TARGET`.
+   *
    * The channel is built with Netty directly because common-jvm's mutual TLS helpers are not
    * published to Maven.
    */
@@ -83,6 +87,9 @@ internal object MetaEnvironment {
     val target = nonBlankEnv("KINGDOM_TARGET") ?: return null
     fun requiredFile(name: String) =
       File(nonBlankEnv(name) ?: error("$name not set (required with KINGDOM_TARGET)"))
+    val adAccountIdKey =
+      nonBlankEnv("ENTITY_METADATA_AD_ACCOUNT_ID_KEY")
+        ?: error("ENTITY_METADATA_AD_ACCOUNT_ID_KEY not set (required with KINGDOM_TARGET)")
     val sslContext =
       GrpcSslContexts.forClient()
         .keyManager(requiredFile("TLS_CERT_FILE"), requiredFile("TLS_KEY_FILE"))
@@ -110,7 +117,11 @@ internal object MetaEnvironment {
     val requestTimeout =
       nonBlankEnv("KINGDOM_REQUEST_TIMEOUT_SECONDS")?.let { Duration.ofSeconds(it.toLong()) }
         ?: DEFAULT_KINGDOM_REQUEST_TIMEOUT
-    return CmmsEventGroupAdAccountResolver(EventGroupsGrpc.newBlockingStub(channel), requestTimeout)
+    return CmmsEventGroupAdAccountResolver(
+      EventGroupsGrpc.newBlockingStub(channel),
+      adAccountIdKey,
+      requestTimeout,
+    )
   }
 
   /** The value of the environment variable [name], or null if it is unset or blank. */

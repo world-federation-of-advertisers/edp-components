@@ -28,9 +28,9 @@ import org.wfanet.measurement.api.v2alpha.getEventGroupRequest
 /** Resolves the Meta ad account that owns an entity from the entity's `EventGroup`. */
 fun interface MetaAdAccountResolver {
   /**
-   * Returns the ad account ID, without its `act_` prefix, recorded in the `EventGroup` named
-   * [eventGroupName] for the entity with [entityKey], or null if that `EventGroup` names no account
-   * or is for another entity.
+   * Returns the ad account ID recorded in the `EventGroup` named [eventGroupName] for the entity
+   * with [entityKey], as recorded, or null if that `EventGroup` names no account or is for another
+   * entity. [MetaImpressionQueryMetrics.recordAccountAccess] drops Meta's `act_` prefix.
    *
    * @throws io.grpc.StatusRuntimeException if the lookup fails
    */
@@ -39,12 +39,14 @@ fun interface MetaAdAccountResolver {
 
 /**
  * [MetaAdAccountResolver] that looks each `EventGroup` up with the CMMS `GetEventGroup` method and
- * reads the `ad_account_id` string from its `entity_metadata`. An `EventGroup` whose entity key
- * does not match the requested one is ignored. Resolved accounts are cached for the life of the
- * instance; anything else is looked up again on the next request.
+ * reads the ad account from the string at [adAccountIdKey] in its `entity_metadata`, whose keys the
+ * `DataProvider` defines. An `EventGroup` whose entity key does not match the requested one is
+ * ignored. Each `EventGroup` that names no account is logged. Resolved accounts are cached for the
+ * life of the instance; anything else is looked up again on the next request.
  */
 class CmmsEventGroupAdAccountResolver(
   private val eventGroupsStub: EventGroupsBlockingStub,
+  private val adAccountIdKey: String,
   private val requestTimeout: Duration,
 ) : MetaAdAccountResolver {
   /** Resolved ad account ID by the `EventGroup` and entity it was resolved for. */
@@ -68,11 +70,17 @@ class CmmsEventGroupAdAccountResolver(
       return null
     }
     val adAccountId =
-      eventGroup.eventGroupMetadata.entityMetadata.fieldsMap[AD_ACCOUNT_ID_FIELD]
+      eventGroup.eventGroupMetadata.entityMetadata.fieldsMap[adAccountIdKey]
         ?.takeIf { it.kindCase == Value.KindCase.STRING_VALUE }
         ?.stringValue
-        ?.removePrefix(ACCOUNT_PREFIX)
-        ?.ifEmpty { null } ?: return null
+        ?.ifEmpty { null }
+    if (adAccountId == null) {
+      logger.warning(
+        "EventGroup $eventGroupName has no ad account: its entity_metadata has no non-empty " +
+          "string at \"$adAccountIdKey\""
+      )
+      return null
+    }
     adAccountIdByEventGroup[cacheKey] = adAccountId
     return adAccountId
   }
@@ -81,8 +89,5 @@ class CmmsEventGroupAdAccountResolver(
 
   companion object {
     private val logger = Logger.getLogger(CmmsEventGroupAdAccountResolver::class.java.name)
-    // Key in a Meta EventGroup's `entity_metadata` naming the ad account that owns the entity.
-    private const val AD_ACCOUNT_ID_FIELD = "ad_account_id"
-    private const val ACCOUNT_PREFIX = "act_"
   }
 }

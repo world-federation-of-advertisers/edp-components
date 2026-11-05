@@ -217,7 +217,7 @@ Each query also records the access it observed to its ad accounts in the
 from an account-level entity, or once the client has resolved the entity's account. Meta does not
 reveal the account behind an entity it hides from the token, so such a refusal is counted only by
 outcome unless the entity names its `EventGroup`: then the function looks the `EventGroup` up with
-`GetEventGroup` and records the `ad_account_id` in its `entity_metadata`. Throttles, rejected
+`GetEventGroup` and records the ad account in its `entity_metadata`. Throttles, rejected
 credentials and other failures leave an account's access unchanged, and an account no report has
 queried yet has no points. Refusals are not cached, so a denied account is queried again on its next
 report and newly granted access shows up.
@@ -225,7 +225,9 @@ report and newly granted access shows up.
 Each of those lookups is counted in the `meta.ad_account_lookup.lookups` counter, with attribute
 `outcome`: `resolved`, `unresolved` (the `EventGroup` names no account, is for another entity, or
 belongs to another `DataProvider`) or `failed` (for example, the Kingdom was unreachable). Alert on
-`failed`: a failed lookup only skips attribution, so the query outcome does not show it.
+both `failed` and `unresolved`: neither changes the query outcome, so neither shows anywhere else.
+Each `unresolved` lookup logs a warning naming the `EventGroup`, which points at the metadata or
+request to fix.
 
 Set `OTEL_METRICS_EXPORTER=google_cloud_monitoring` and `OTEL_SERVICE_NAME` (for example
 `meta.impression_query`), and grant the service account `roles/monitoring.metricWriter`, to export
@@ -241,10 +243,15 @@ the `DataProvider`'s TLS certificate, PKCS #8 private key and trusted root certi
 named by `TLS_CERT_FILE`, `TLS_KEY_FILE` and `CERT_COLLECTION_FILE`, for example with
 `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `KINGDOM_CERT_HOST` optionally overrides the
 host name expected in the Kingdom's certificate, and `KINGDOM_REQUEST_TIMEOUT_SECONDS` (default 5)
-the deadline of each lookup. When `KINGDOM_TARGET` is unset or blank, no lookups are made. When it
-is set, a missing TLS variable or unreadable file fails the function's startup. Only `EventGroup`s
-of the request's `data_provider` are looked up. A failed lookup only skips attribution; it never
-fails the query.
+the deadline of each lookup. Set `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` to the key in each
+`EventGroup`'s `entity_metadata` that holds the ad account; the `DataProvider` defines it, so it is
+required. When `KINGDOM_TARGET` is unset or blank, no lookups are made. When it is set, a missing
+TLS variable, unreadable file or missing `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` fails the function's
+startup. Only `EventGroup`s of the request's `data_provider` are looked up. A failed lookup only
+skips attribution; it never fails the query.
+
+The cross-media-measurement deployment does not set these yet, so lookups are off there until
+world-federation-of-advertisers/cross-media-measurement#4808 adds them.
 
 ## Status
 
