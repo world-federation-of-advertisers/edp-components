@@ -21,7 +21,8 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder
 import java.io.File
 import java.time.Duration
 import java.util.concurrent.TimeUnit
-import org.wfanet.measurement.api.v2alpha.EventGroupsGrpc
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
+import org.wfanet.measurement.common.throttler.MaximumRateThrottler
 
 /** Reads the Meta Cloud Function's configuration from its environment. */
 internal object MetaEnvironment {
@@ -73,8 +74,9 @@ internal object MetaEnvironment {
    * PEM) and `CERT_COLLECTION_FILE` (trusted root certificates, PEM), typically Secret Manager
    * secrets mounted as files. With `KINGDOM_TARGET` set, a missing or unreadable file is a
    * misconfiguration and fails the function's startup. `KINGDOM_CERT_HOST` optionally overrides the
-   * host name expected in the Kingdom's certificate, and `KINGDOM_REQUEST_TIMEOUT_SECONDS` the
-   * deadline of each lookup.
+   * host name expected in the Kingdom's certificate, `KINGDOM_REQUEST_TIMEOUT_SECONDS` the deadline
+   * of each lookup, and `KINGDOM_REQUESTS_PER_SECOND` the maximum rate of lookups the instance
+   * sends, as for cross-media-measurement's `EventGroupSyncFunction`.
    *
    * `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` names the key in each `EventGroup`'s `entity_metadata` that
    * holds the ad account. The `DataProvider` defines that key, so it is required with
@@ -100,6 +102,8 @@ internal object MetaEnvironment {
         .sslContext(sslContext)
         .defaultServiceConfig(KINGDOM_SERVICE_CONFIG)
         .enableRetry()
+        // See grpc/grpc-kotlin#263.
+        .directExecutor()
     val certHost = nonBlankEnv("KINGDOM_CERT_HOST")
     if (certHost != null) {
       channelBuilder.overrideAuthority(certHost)
@@ -117,8 +121,11 @@ internal object MetaEnvironment {
     val requestTimeout =
       nonBlankEnv("KINGDOM_REQUEST_TIMEOUT_SECONDS")?.let { Duration.ofSeconds(it.toLong()) }
         ?: DEFAULT_KINGDOM_REQUEST_TIMEOUT
+    val requestsPerSecond =
+      nonBlankEnv("KINGDOM_REQUESTS_PER_SECOND")?.toDouble() ?: DEFAULT_KINGDOM_REQUESTS_PER_SECOND
     return CmmsEventGroupAdAccountResolver(
-      EventGroupsGrpc.newBlockingStub(channel),
+      EventGroupsCoroutineStub(channel),
+      MaximumRateThrottler(requestsPerSecond),
       adAccountIdKey,
       requestTimeout,
     )
@@ -129,6 +136,7 @@ internal object MetaEnvironment {
 
   // Short, because a lookup runs inside the function's request timeout.
   private val DEFAULT_KINGDOM_REQUEST_TIMEOUT: Duration = Duration.ofSeconds(5)
+  private const val DEFAULT_KINGDOM_REQUESTS_PER_SECOND = 4.0
   private val CHANNEL_SHUTDOWN_TIMEOUT: Duration = Duration.ofSeconds(1)
 
   /**

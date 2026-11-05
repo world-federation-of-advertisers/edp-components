@@ -22,8 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.logging.Logger
 import org.wfanet.measurement.api.v2alpha.EventGroup
-import org.wfanet.measurement.api.v2alpha.EventGroupsGrpc.EventGroupsBlockingStub
+import org.wfanet.measurement.api.v2alpha.EventGroupsGrpcKt.EventGroupsCoroutineStub
 import org.wfanet.measurement.api.v2alpha.getEventGroupRequest
+import org.wfanet.measurement.common.throttler.Throttler
 
 /** Resolves the Meta ad account that owns an entity from the entity's `EventGroup`. */
 fun interface MetaAdAccountResolver {
@@ -32,9 +33,9 @@ fun interface MetaAdAccountResolver {
    * with [entityKey], as recorded, or null if that `EventGroup` names no account or is for another
    * entity. [MetaImpressionQueryMetrics.recordAccountAccess] drops Meta's `act_` prefix.
    *
-   * @throws io.grpc.StatusRuntimeException if the lookup fails
+   * @throws io.grpc.StatusException if the lookup fails
    */
-  fun adAccountIdOf(eventGroupName: String, entityKey: EventGroup.EntityKey): String?
+  suspend fun adAccountIdOf(eventGroupName: String, entityKey: EventGroup.EntityKey): String?
 }
 
 /**
@@ -42,26 +43,33 @@ fun interface MetaAdAccountResolver {
  * reads the ad account from the string at [adAccountIdKey] in its `entity_metadata`, whose keys the
  * `DataProvider` defines. An `EventGroup` whose entity key does not match the requested one is
  * ignored. Each `EventGroup` that names no account is logged. Resolved accounts are cached for the
- * life of the instance; anything else is looked up again on the next request.
+ * life of the instance; anything else is looked up again on the next request. Each lookup waits on
+ * [throttler], which should be shared by every caller of the Kingdom in the instance.
  */
 class CmmsEventGroupAdAccountResolver(
-  private val eventGroupsStub: EventGroupsBlockingStub,
+  private val eventGroupsStub: EventGroupsCoroutineStub,
+  private val throttler: Throttler,
   private val adAccountIdKey: String,
   private val requestTimeout: Duration,
 ) : MetaAdAccountResolver {
   /** Resolved ad account ID by the `EventGroup` and entity it was resolved for. */
   private val adAccountIdByEventGroup = ConcurrentHashMap<CacheKey, String>()
 
-  override fun adAccountIdOf(eventGroupName: String, entityKey: EventGroup.EntityKey): String? {
+  override suspend fun adAccountIdOf(
+    eventGroupName: String,
+    entityKey: EventGroup.EntityKey,
+  ): String? {
     val cacheKey = CacheKey(eventGroupName, entityKey)
     val cached: String? = adAccountIdByEventGroup[cacheKey]
     if (cached != null) {
       return cached
     }
     val eventGroup: EventGroup =
-      eventGroupsStub
-        .withDeadlineAfter(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
-        .getEventGroup(getEventGroupRequest { name = eventGroupName })
+      throttler.onReady {
+        eventGroupsStub
+          .withDeadlineAfter(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+          .getEventGroup(getEventGroupRequest { name = eventGroupName })
+      }
     if (eventGroup.entityKey != entityKey) {
       logger.warning(
         "EventGroup $eventGroupName has entity key ${eventGroup.entityKey}, not the requested " +

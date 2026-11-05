@@ -55,6 +55,8 @@ kt_jvm_library(
         "@maven//:io_opentelemetry_opentelemetry_sdk_common",
         "@maven//:io_opentelemetry_opentelemetry_sdk_extension_autoconfigure",
         "@maven//:io_opentelemetry_opentelemetry_sdk_metrics",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core",
+        "@maven//:org_wfanet_measurement_common_throttler",
     ],
 )
 

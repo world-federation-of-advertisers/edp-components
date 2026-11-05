@@ -39,6 +39,7 @@ maven.install(
         "org.jetbrains.kotlin:kotlin-test:2.2.21",
         "org.jetbrains.kotlinx:kotlinx-coroutines-core",
         "org.wfanet.measurement:common-testing:0.159.0",
+        "org.wfanet.measurement:common-throttler:0.161.0-rc1",
     ],
     boms = ["io.opentelemetry:opentelemetry-bom:1.42.1"],
     fail_if_repin_required = False,

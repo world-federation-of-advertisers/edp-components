@@ -243,12 +243,13 @@ the `DataProvider`'s TLS certificate, PKCS #8 private key and trusted root certi
 named by `TLS_CERT_FILE`, `TLS_KEY_FILE` and `CERT_COLLECTION_FILE`, for example with
 `--set-secrets=/etc/cmms/tls.pem=<secret>:latest,...`. `KINGDOM_CERT_HOST` optionally overrides the
 host name expected in the Kingdom's certificate, and `KINGDOM_REQUEST_TIMEOUT_SECONDS` (default 5)
-the deadline of each lookup. Set `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` to the key in each
-`EventGroup`'s `entity_metadata` that holds the ad account; the `DataProvider` defines it, so it is
-required. When `KINGDOM_TARGET` is unset or blank, no lookups are made. When it is set, a missing
-TLS variable, unreadable file or missing `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` fails the function's
-startup. Only `EventGroup`s of the request's `data_provider` are looked up. A failed lookup only
-skips attribution; it never fails the query.
+the deadline of each lookup, and `KINGDOM_REQUESTS_PER_SECOND` (default 4) the maximum rate of
+lookups each instance sends to the Kingdom. Set `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` to the key in
+each `EventGroup`'s `entity_metadata` that holds the ad account; the `DataProvider` defines it, so
+it is required. When `KINGDOM_TARGET` is unset or blank, no lookups are made. When it is set, a
+missing TLS variable, unreadable file or missing `ENTITY_METADATA_AD_ACCOUNT_ID_KEY` fails the
+function's startup. Only `EventGroup`s of the request's `data_provider` are looked up. A failed
+lookup only skips attribution; it never fails the query.
 
 The cross-media-measurement deployment does not set these yet, so lookups are off there until
 world-federation-of-advertisers/cross-media-measurement#4808 adds them.

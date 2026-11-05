@@ -22,6 +22,7 @@ import com.google.cloud.functions.HttpResponse
 import java.time.Clock
 import java.util.logging.Level
 import java.util.logging.Logger
+import kotlinx.coroutines.runBlocking
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
@@ -268,7 +269,7 @@ class MetaImpressionQueryFunction(
     }
     val adAccountId =
       try {
-        adAccountResolver.adAccountIdOf(entity.eventGroup, entity.entityKey)
+        runBlocking { adAccountResolver.adAccountIdOf(entity.eventGroup, entity.entityKey) }
       } catch (e: Exception) {
         // Any failure, not only an RPC error, is contained: attribution is best effort and must
         // never fail the query.
