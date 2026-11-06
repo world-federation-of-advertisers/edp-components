@@ -1,5 +1,5 @@
 # edp-components
-Componenets built for EDPs
+Components built for EDPs.
 
 ## Development Standards
 
