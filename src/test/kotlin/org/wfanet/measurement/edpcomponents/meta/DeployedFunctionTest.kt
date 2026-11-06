@@ -36,7 +36,8 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
-import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entityKey
+import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
+import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entity
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 
@@ -195,9 +196,11 @@ class DeployedFunctionTest {
           .toString()
       this.dataProvider = dataProvider
       query = impressionQuery {
-        entityKeys += entityKey {
-          this.entityType = this@DeployedFunctionTest.entityType
-          this.entityId = this@DeployedFunctionTest.entityId!!
+        entities += entity {
+          entityKey = entityKey {
+            this.entityType = this@DeployedFunctionTest.entityType
+            this.entityId = this@DeployedFunctionTest.entityId!!
+          }
         }
         timeInterval = interval {
           startTime = timestamp { seconds = startEpochSeconds!!.toLong() }

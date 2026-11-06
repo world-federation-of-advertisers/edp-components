@@ -32,6 +32,7 @@ import java.util.logging.Logger
 internal object MetaTelemetry {
   private val sdk: OpenTelemetrySdk =
     AutoConfiguredOpenTelemetrySdk.builder()
+      // Defaults only: `OTEL_*` environment variables and system properties take precedence.
       .addPropertiesSupplier {
         mapOf(
           "otel.metrics.exporter" to "none",
