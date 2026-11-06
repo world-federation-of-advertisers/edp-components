@@ -14,8 +14,8 @@ bazel_dep(
     repo_name = "cross_media_measurement_api",
 )
 
-# protobuf and rules_kotlin_jvm contribute to the shared `maven` repo; rules_kotlin_jvm's BOMs
-# supply the gRPC and kotlinx-coroutines versions.
+# protobuf and rules_kotlin_jvm contribute to the shared `maven` repo; rules_kotlin_jvm also
+# provides kotlinx-coroutines-core, and its BOMs supply the gRPC versions.
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 maven.install(
     artifacts = [
@@ -37,7 +37,6 @@ maven.install(
         "junit:junit:4.13.2",
         "org.jetbrains.kotlin:kotlin-reflect:2.2.21",
         "org.jetbrains.kotlin:kotlin-test:2.2.21",
-        "org.jetbrains.kotlinx:kotlinx-coroutines-core",
         "org.wfanet.measurement:common-testing:0.159.0",
         "org.wfanet.measurement:common-throttler:0.161.0",
     ],
