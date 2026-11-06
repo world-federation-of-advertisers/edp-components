@@ -36,8 +36,10 @@ import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse
+import org.wfanet.measurement.api.v2alpha.DataProviderImpressionQueryResponse.SkipDetail.SkipReason
 import org.wfanet.measurement.api.v2alpha.EventGroupKt.entityKey
 import org.wfanet.measurement.api.v2alpha.ImpressionQueryKt.entity
+import org.wfanet.measurement.api.v2alpha.copy
 import org.wfanet.measurement.api.v2alpha.dataProviderImpressionQueryRequest
 import org.wfanet.measurement.api.v2alpha.impressionQuery
 
@@ -82,6 +84,12 @@ class DeployedFunctionTest {
   /** Optional. When set, the returned count must equal it exactly. */
   private val expectedImpressions: String? = System.getenv("META_TEST_EXPECTED_IMPRESSIONS")
 
+  /**
+   * Optional. The `EventGroup` of [HIDDEN_CAMPAIGN_ID], whose `entity_metadata` names an ad
+   * account. When set, the EventGroup lookup test runs. The Kingdom assigns its ID, so it differs
+   * per environment.
+   */
+  private val eventGroup: String? = System.getenv("META_TEST_EVENT_GROUP")
   /** Optional. Writes the serialised request here so it can be replayed with curl. */
   private val writeRequestTo: String? = System.getenv("META_TEST_WRITE_REQUEST_TO")
 
@@ -131,27 +139,7 @@ class DeployedFunctionTest {
       logger.info("Wrote serialised request to $writeRequestTo (${bytes.size} bytes)")
     }
 
-    val response: HttpResponse<ByteArray> =
-      HttpClient.newBuilder()
-        .connectTimeout(CONNECT_TIMEOUT)
-        .build()
-        .send(
-          HttpRequest.newBuilder(URI.create(functionUrl!!))
-            // Mirrors ValidationCloudFunctionClient: an audience-scoped OIDC ID token, and a
-            // binary-proto content type. Google rejects an unauthenticated call before our code
-            // runs, so a 401/403 here means IAM, not application logic.
-            .header("Authorization", "Bearer $idToken")
-            .header("Content-Type", CONTENT_TYPE_PROTOBUF)
-            .timeout(REQUEST_TIMEOUT)
-            .POST(HttpRequest.BodyPublishers.ofByteArray(request.toByteArray()))
-            .build(),
-          HttpResponse.BodyHandlers.ofByteArray(),
-        )
-
-    logger.info("HTTP ${response.statusCode()} from $functionUrl")
-    assertThat(response.statusCode()).isEqualTo(200)
-
-    val queryResponse = DataProviderImpressionQueryResponse.parseFrom(response.body())
+    val queryResponse: DataProviderImpressionQueryResponse = query(request)
     assertThat(queryResponse.requestId).isEqualTo(request.requestId)
 
     when {
@@ -178,6 +166,66 @@ class DeployedFunctionTest {
       }
       else -> throw AssertionError("Response set neither result nor skipped: $queryResponse")
     }
+  }
+
+  @Test
+  fun `deployed function looks up the EventGroup of an entity Meta hides`() {
+    assumeTrue(
+      "Skipping the EventGroup lookup test. Set META_TEST_EVENT_GROUP.",
+      !eventGroup.isNullOrEmpty(),
+    )
+    // Meta does not know HIDDEN_CAMPAIGN_ID, so it refuses the query as it does for an entity it
+    // hides, and the function looks up the ad account in the entity's EventGroup. The request comes
+    // from that EventGroup's DataProvider, the only one the Kingdom lets read it.
+    val request =
+      buildRequest().copy {
+        dataProvider = eventGroup!!.substringBefore("/eventGroups/")
+        query =
+          query.copy {
+            entities.clear()
+            entities += entity {
+              entityKey = entityKey {
+                entityType = HIDDEN_ENTITY_TYPE
+                entityId = HIDDEN_CAMPAIGN_ID
+              }
+              this.eventGroup = this@DeployedFunctionTest.eventGroup
+            }
+          }
+      }
+
+    val queryResponse: DataProviderImpressionQueryResponse = query(request)
+
+    // The response is the same whether or not the lookup succeeds; the caller checks the
+    // `meta.ad_account_lookup.lookups` metric for a `resolved` lookup.
+    assertThat(queryResponse.requestId).isEqualTo(request.requestId)
+    assertThat(queryResponse.skipped.reason).isEqualTo(SkipReason.ENTITY_NOT_FOUND)
+    logger.info("RESULT: the function skipped the hidden entity with ENTITY_NOT_FOUND")
+  }
+
+  /** Sends [request] to the deployed function as the real caller does and returns its response. */
+  private fun query(
+    request: DataProviderImpressionQueryRequest
+  ): DataProviderImpressionQueryResponse {
+    val response: HttpResponse<ByteArray> =
+      HttpClient.newBuilder()
+        .connectTimeout(CONNECT_TIMEOUT)
+        .build()
+        .send(
+          HttpRequest.newBuilder(URI.create(functionUrl!!))
+            // Mirrors ValidationCloudFunctionClient: an audience-scoped OIDC ID token, and a
+            // binary-proto content type. Google rejects an unauthenticated call before our code
+            // runs, so a 401/403 here means IAM, not application logic.
+            .header("Authorization", "Bearer $idToken")
+            .header("Content-Type", CONTENT_TYPE_PROTOBUF)
+            .timeout(REQUEST_TIMEOUT)
+            .POST(HttpRequest.BodyPublishers.ofByteArray(request.toByteArray()))
+            .build(),
+          HttpResponse.BodyHandlers.ofByteArray(),
+        )
+
+    logger.info("HTTP ${response.statusCode()} from $functionUrl")
+    assertThat(response.statusCode()).isEqualTo(200)
+    return DataProviderImpressionQueryResponse.parseFrom(response.body())
   }
 
   private fun buildRequest(): DataProviderImpressionQueryRequest {
@@ -212,6 +260,12 @@ class DeployedFunctionTest {
 
   companion object {
     private val logger: Logger = Logger.getLogger(DeployedFunctionTest::class.java.name)
+    /**
+     * Entity key of the `EventGroup` in `META_TEST_EVENT_GROUP`. Made up, so Meta refuses it; the
+     * same in every environment, where that `EventGroup` is created with this key.
+     */
+    private const val HIDDEN_ENTITY_TYPE = "campaign"
+    private const val HIDDEN_CAMPAIGN_ID = "edp-components-lookup-test"
 
     private const val CONTENT_TYPE_PROTOBUF = "application/x-protobuf"
     private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
