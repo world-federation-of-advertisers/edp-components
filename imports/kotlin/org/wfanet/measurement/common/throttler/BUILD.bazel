@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "throttler",
+    actual = "@maven//:org_wfanet_measurement_common_throttler",
+)

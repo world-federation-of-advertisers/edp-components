@@ -1,18 +1,18 @@
 module(
     name = "edp-components",
-    version = "0.1.0",
+    repo_name = "wfa_edp_components",
 )
+
+#  --- WFA registry modules. ---
+bazel_dep(name = "rules_kotlin_jvm", version = "0.13.0", repo_name = "wfa_rules_kotlin_jvm")
+bazel_dep(name = "cross-media-measurement-api", version = "0.106.0", repo_name = "wfa_cross_media_measurement_api")
+
+# --- Bazel Central Registry modules. ---
 
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "33.1")
 bazel_dep(name = "rules_java", version = "8.15.2")
 bazel_dep(name = "rules_jvm_external", version = "6.8")
-bazel_dep(name = "rules_kotlin_jvm", version = "0.13.0", repo_name = "wfa_rules_kotlin_jvm")
-bazel_dep(
-    name = "cross-media-measurement-api",
-    version = "0.106.0",
-    repo_name = "cross_media_measurement_api",
-)
 
 # protobuf and rules_kotlin_jvm contribute to the shared `maven` repo; rules_kotlin_jvm also
 # provides kotlinx-coroutines-core, and its BOMs supply the gRPC versions.
@@ -40,9 +40,11 @@ maven.install(
         "org.wfanet.measurement:common-testing:0.159.0",
         "org.wfanet.measurement:common-throttler:0.161.0",
     ],
-    boms = ["io.opentelemetry:opentelemetry-bom:1.42.1"],
-    fail_if_repin_required = False,
-    fetch_sources = True,
+    boms = [
+        "io.opentelemetry:opentelemetry-bom:1.42.1",
+    ],
+    fail_if_repin_required = True,
+    fetch_sources = True,  # For IDE integration.
     known_contributing_modules = [
         "edp-components",
         "protobuf",
