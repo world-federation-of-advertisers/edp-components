@@ -8,14 +8,14 @@ package(default_visibility = ["//visibility:public"])
 kt_jvm_proto_library(
     name = "data_provider_impression_query_kt_jvm_proto",
     deps = [
-        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:data_provider_impression_query_proto",
+        "@wfa_cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:data_provider_impression_query_proto",
     ],
 )
 
 kt_jvm_proto_library(
     name = "event_group_kt_jvm_proto",
     deps = [
-        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_group_proto",
+        "@wfa_cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_group_proto",
     ],
 )
 
@@ -23,7 +23,7 @@ kt_jvm_proto_library(
 kt_jvm_grpc_proto_library(
     name = "event_groups_service_kt_jvm_grpc_proto",
     deps = [
-        "@cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_groups_service_proto",
+        "@wfa_cross_media_measurement_api//src/main/proto/wfa/measurement/api/v2alpha:event_groups_service_proto",
     ],
 )
 
@@ -40,23 +40,23 @@ kt_jvm_library(
         "MetaTelemetry.kt",
     ],
     # Registers the `google_cloud_monitoring` exporter with OpenTelemetry autoconfiguration.
-    runtime_deps = ["@maven//:com_google_cloud_opentelemetry_exporter_auto"],
+    runtime_deps = ["//imports/java/com/google/cloud/opentelemetry:exporter_auto"],
     deps = [
         ":data_provider_impression_query_kt_jvm_proto",
         ":event_group_kt_jvm_proto",
         ":event_groups_service_kt_jvm_grpc_proto",
-        "@maven//:com_google_cloud_functions_functions_framework_api",
-        "@maven//:com_google_code_gson_gson",
-        "@maven//:com_google_protobuf_protobuf_java",
-        "@maven//:io_grpc_grpc_api",
-        "@maven//:io_grpc_grpc_netty_shaded",
-        "@maven//:io_opentelemetry_opentelemetry_api",
-        "@maven//:io_opentelemetry_opentelemetry_sdk",
-        "@maven//:io_opentelemetry_opentelemetry_sdk_common",
-        "@maven//:io_opentelemetry_opentelemetry_sdk_extension_autoconfigure",
-        "@maven//:io_opentelemetry_opentelemetry_sdk_metrics",
-        "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core",
-        "@maven//:org_wfanet_measurement_common_throttler",
+        "//imports/java/com/google/cloud/functions:functions_framework_api",
+        "//imports/java/com/google/gson",
+        "//imports/java/com/google/protobuf",
+        "//imports/java/io/grpc:api",
+        "//imports/java/io/grpc/netty/shaded",
+        "//imports/java/io/opentelemetry/api",
+        "//imports/java/io/opentelemetry/sdk",
+        "//imports/java/io/opentelemetry/sdk:sdk_autoconfigure",
+        "//imports/java/io/opentelemetry/sdk:sdk_common",
+        "//imports/java/io/opentelemetry/sdk:sdk_metrics",
+        "//imports/kotlin/kotlinx/coroutines:core",
+        "//imports/kotlin/org/wfanet/measurement/common/throttler",
     ],
 )
 

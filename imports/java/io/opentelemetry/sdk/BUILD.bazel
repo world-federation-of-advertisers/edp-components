@@ -1,0 +1,21 @@
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "sdk",
+    actual = "@maven//:io_opentelemetry_opentelemetry_sdk",
+)
+
+alias(
+    name = "sdk_common",
+    actual = "@maven//:io_opentelemetry_opentelemetry_sdk_common",
+)
+
+alias(
+    name = "sdk_metrics",
+    actual = "@maven//:io_opentelemetry_opentelemetry_sdk_metrics",
+)
+
+alias(
+    name = "sdk_autoconfigure",
+    actual = "@maven//:io_opentelemetry_opentelemetry_sdk_extension_autoconfigure",
+)
