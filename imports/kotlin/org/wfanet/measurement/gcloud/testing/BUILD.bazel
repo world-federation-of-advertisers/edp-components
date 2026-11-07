@@ -1,0 +1,7 @@
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "functions_framework_invoker_process",
+    testonly = True,
+    actual = "@maven//:org_wfanet_measurement_common_testing",
+)
